@@ -357,6 +357,15 @@ if [ "$cache_ok" -eq 0 ]; then
   if mountpoint -q "$cache"; then umount -l "$cache" || true; fi
   for dir in "${cache_dirs[@]}"; do mkdir -p "$cache/$dir" && chown @USER@:@USER@ "$cache/$dir"; done
 fi
+# The job-started hook from the image (older images could block on a hung NFS cache): replace it.
+cat >/opt/actions-runner/kgr-job-started.sh <<'HOOK'
+#!/usr/bin/env bash
+# Runner job-started hook: a hint for the host's git fetch. It never fails or holds up the job, even when
+# the NFS cache hangs (--kill-after: a process stuck on NFS can ignore TERM).
+timeout --kill-after=1 2 sh -c 'date +%s >/mnt/ci-cache/git/fetch-request' >/dev/null 2>&1 || true
+exit 0
+HOOK
+chmod 0755 /opt/actions-runner/kgr-job-started.sh
 # Images built before the host owned the git cache copied shallow checkouts into it: turn that hook off.
 sed -i '/^ACTIONS_RUNNER_HOOK_JOB_COMPLETED=\/opt\/actions-runner\/kgr-job-completed.sh$/d' /opt/actions-runner/.env
 # Borrow git objects only from a complete mirror: a missing or shallow one breaks checkouts.

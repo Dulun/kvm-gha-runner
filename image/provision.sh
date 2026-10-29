@@ -131,8 +131,9 @@ printf '%s\n' \
 # Each job start asks the host to fetch new commits into the git cache (the host owns it; VMs only read).
 cat >/opt/actions-runner/kgr-job-started.sh <<'HOOK'
 #!/usr/bin/env bash
-# Runner job-started hook. Best effort: it never fails the job.
-date +%s >/mnt/ci-cache/git/fetch-request 2>/dev/null || true
+# Runner job-started hook: a hint for the host's git fetch. It never fails or holds up the job, even when
+# the NFS cache hangs (--kill-after: a process stuck on NFS can ignore TERM).
+timeout --kill-after=1 2 sh -c 'date +%s >/mnt/ci-cache/git/fetch-request' >/dev/null 2>&1 || true
 exit 0
 HOOK
 chmod 0755 /opt/actions-runner/kgr-job-started.sh
