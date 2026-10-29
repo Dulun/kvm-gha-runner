@@ -303,7 +303,7 @@ ensure_caches() {
   local name project
   sudo install -d "$cache_root"/{pnpm,pnpm-cache,npm,toolcache,go-mod,pip,uv,verdaccio,registry-hub,registry-mcr,image-downloads}
   # VMs write as uid 1000 (all_squash): repair anything an older setup or a root process left behind.
-  sudo find "$cache_root"/{pnpm,pnpm-cache,npm,toolcache,go-mod,pip,uv} ! -uid 1000 -exec chown 1000:1000 {} +
+  sudo find "$cache_root"/{pnpm,pnpm-cache,npm,toolcache,go-mod,pip,uv,image-downloads} ! -uid 1000 -exec chown 1000:1000 {} +
   sudo install -d "$cache_root/verdaccio/storage"
   sudo chown 10001:10001 "$cache_root/verdaccio/storage"
   if [ -n "$HOST_PROXY" ]; then
