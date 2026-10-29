@@ -339,6 +339,24 @@ trap finish EXIT HUP INT TERM
 jit="$(</run/actions-runner-jit)"
 rm -f /run/actions-runner-jit
 install -o @USER@ -g @USER@ -m 0750 -d /home/@USER@/actions-runner-logs
+
+# The shared cache is an optimisation, never a requirement: wait briefly for the NFS mount, and if it is
+# missing or not writable, run this job on local directories instead of failing it.
+cache=/mnt/ci-cache
+cache_dirs=(pnpm pnpm-cache npm toolcache go-mod pip uv git)
+cache_ok=0
+for _ in $(seq 30); do
+  if mountpoint -q "$cache" && runuser -u @USER@ -- test -w "$cache/toolcache"; then
+    cache_ok=1
+    break
+  fi
+  sleep 1
+done
+if [ "$cache_ok" -eq 0 ]; then
+  echo "kvm-gha-runner: shared cache $cache is not mounted or not writable; this job runs without it" >&2
+  if mountpoint -q "$cache"; then umount -l "$cache" || true; fi
+  for dir in "${cache_dirs[@]}"; do mkdir -p "$cache/$dir" && chown @USER@:@USER@ "$cache/$dir"; done
+fi
 runuser -u @USER@ -- env \
   HOME=/home/@USER@ \
   USER=@USER@ \

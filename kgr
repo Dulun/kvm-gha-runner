@@ -301,7 +301,8 @@ ensure_caches() {
   step 'Caches: Verdaccio :4873, Docker Hub mirror :5000, apt :3142, git, NFS /srv/ci-cache'
   local name project
   sudo install -d "$cache_root"/{pnpm,pnpm-cache,npm,toolcache,go-mod,pip,uv,verdaccio,registry-hub}
-  sudo chown 1000:1000 "$cache_root"/{pnpm,pnpm-cache,npm,toolcache,go-mod,pip,uv}
+  # VMs write as uid 1000 (all_squash): repair anything an older setup or a root process left behind.
+  sudo find "$cache_root"/{pnpm,pnpm-cache,npm,toolcache,go-mod,pip,uv} ! -uid 1000 -exec chown 1000:1000 {} +
   sudo install -d "$cache_root/verdaccio/storage"
   sudo chown 10001:10001 "$cache_root/verdaccio/storage"
   if [ -n "$HOST_PROXY" ]; then
@@ -450,6 +451,8 @@ cmd_status() {
   check 'apt cache :3142' curl --fail --silent --max-time 5 --output /dev/null http://192.168.122.1:3142/acng-report.html
   check 'git cache (filled by jobs)' test -d "$cache_root/git/mirror.git/objects"
   check 'NFS export /srv/ci-cache' bash -c 'sudo exportfs -v | grep --quiet /srv/ci-cache'
+  check 'cache folders writable by VMs (uid 1000)' bash -c \
+    "test -z \"\$(sudo find '$cache_root'/{pnpm,pnpm-cache,npm,toolcache,go-mod,pip,uv} -maxdepth 0 ! -uid 1000)\""
   check "golden image $GOLDEN_VOLUME" "${virsh_cmd[@]}" vol-info --pool default "$GOLDEN_VOLUME"
   check 'kvm-gha-runner service' systemctl --user is-active --quiet kvm-gha-runner.service
   check_proxy
