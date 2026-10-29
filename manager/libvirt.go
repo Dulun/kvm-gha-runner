@@ -357,6 +357,13 @@ if [ "$cache_ok" -eq 0 ]; then
   if mountpoint -q "$cache"; then umount -l "$cache" || true; fi
   for dir in "${cache_dirs[@]}"; do mkdir -p "$cache/$dir" && chown @USER@:@USER@ "$cache/$dir"; done
 fi
+# Images built before the host owned the git cache copied shallow checkouts into it: turn that hook off.
+sed -i '/^ACTIONS_RUNNER_HOOK_JOB_COMPLETED=\/opt\/actions-runner\/kgr-job-completed.sh$/d' /opt/actions-runner/.env
+# Borrow git objects only from a complete mirror: a missing or shallow one breaks checkouts.
+mirror="$cache/git/mirror.git"
+if [ ! -d "$mirror/objects" ] || [ -e "$mirror/shallow" ]; then
+  sed -i '/^GIT_ALTERNATE_OBJECT_DIRECTORIES=/d' /opt/actions-runner/.env
+fi
 runuser -u @USER@ -- env \
   HOME=/home/@USER@ \
   USER=@USER@ \

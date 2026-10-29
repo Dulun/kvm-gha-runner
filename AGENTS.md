@@ -33,7 +33,7 @@ Runtime state is outside the repo:
   - New downloads must honor the proxy. Empty proxy means a direct connection.
 - **Download once.** npm and pnpm go through Verdaccio, Docker Hub pulls through `:5000`, and the pnpm store,
   Actions tool cache, Go modules, pip and uv caches are on NFS. apt goes through apt-cacher-ng on `:3142`, and git
-  borrows objects from a mirror on NFS that jobs fill (job-completed hook); it must never be gc'd. Tools and Docker images are baked into the golden
+  borrows objects from a full-history mirror the host fetches when a job starts; it must never be shallow or gc'd. Tools and Docker images are baked into the golden
   image only when the owner selects them in `kgr` (Image contents). Their IDs in `image_tool_catalog` (kgr) and
   the `has_tool` branches in `image/provision.sh` must match.
 - **Pinned and verified.** Every downloaded binary (Go, Node, runner) has an exact version plus sha256. The

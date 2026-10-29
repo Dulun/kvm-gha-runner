@@ -112,6 +112,7 @@ configure_github() {
     printf '\nCreate the token at https://github.com/settings/personal-access-tokens/new\n'
     printf '  - Repository access: Only select repositories -> %s\n' "$repo_path"
     printf '  - Permissions -> Repository permissions -> Administration: Read and write\n'
+    printf '    Contents: Read-only (lets the git cache fetch a private repository)\n'
     printf '    (Metadata: Read-only is added automatically; nothing else is needed)\n'
     printf '  - Expiration: your choice. When it expires, runners stop registering: rerun kgr github.\n\n'
     read -r -s -p 'Paste the token (hidden): ' token
@@ -342,17 +343,47 @@ ensure_caches() {
   sudo systemctl enable apt-cacher-ng.service >/dev/null 2>&1
   sudo systemctl restart apt-cacher-ng.service
 
-  # git cache: jobs add the objects they fetched (runner job-completed hook) and borrow the rest
-  # (GIT_ALTERNATE_OBJECT_DIRECTORIES), so each commit is downloaded once. Never gc it.
-  if [ ! -d "$cache_root/git/mirror.git" ]; then
-    # Owned by uid 1000: VMs write it over NFS as that uid (all_squash).
-    sudo git init --bare --quiet "$cache_root/git/mirror.git"
-    sudo git -C "$cache_root/git/mirror.git" config gc.auto 0
-    sudo chown -R 1000:1000 "$cache_root/git"
+  # git cache: a full mirror on the host that VMs borrow objects from (GIT_ALTERNATE_OBJECT_DIRECTORIES).
+  # No timer: each job start touches git/fetch-request, and a path unit fetches only what is new. It must
+  # hold full history (a shallow mirror breaks checkouts) and is never gc'd. Only this host writes it.
+  local mirror="$cache_root/git/mirror.git" units
+  units="$(dirname -- "$unit")"
+  if [ -e "$mirror/shallow" ]; then
+    warn 'removing a shallow git cache left by an earlier version'
+    sudo rm -rf -- "$mirror"
   fi
+  sudo install -d -o "$USER" -g "$USER" "$cache_root/git"
+  sudo chown -R "$USER:$USER" "$cache_root/git"
+  touch "$cache_root/git/fetch-request"
+  sudo chown 1000:1000 "$cache_root/git/fetch-request"
+  install -d "$units"
+  printf '%s\n' '[Unit]' 'Description=kvm-gha-runner git cache fetch' '' '[Service]' 'Type=oneshot' \
+    "ExecStart=$repo/kgr git-fetch" >"$units/kvm-gha-git-fetch.service"
+  printf '%s\n' '[Unit]' 'Description=Fetch into the git cache when a job starts' '' '[Path]' \
+    "PathChanged=$cache_root/git/fetch-request" '' '[Install]' 'WantedBy=default.target' \
+    >"$units/kvm-gha-git-fetch.path"
   # Earlier versions refreshed the mirror on a timer.
   systemctl --user disable --now kvm-gha-git-sync.timer >/dev/null 2>&1 || true
-  rm -f "$(dirname -- "$unit")"/kvm-gha-git-sync.{service,timer}
+  rm -f "$units"/kvm-gha-git-sync.{service,timer}
+  systemctl --user daemon-reload
+  systemctl --user enable --now kvm-gha-git-fetch.path >/dev/null 2>&1
+  systemctl --user start --no-block kvm-gha-git-fetch.service
+}
+
+cmd_git_fetch() {
+  local mirror="$cache_root/git/mirror.git" auth=()
+  if [ ! -d "$mirror" ]; then
+    git init --bare --quiet "$mirror"
+    git -C "$mirror" config gc.auto 0
+    git -C "$mirror" remote add origin "$GITHUB_URL.git"
+  fi
+  git -C "$mirror" remote set-url origin "$GITHUB_URL.git"
+  if [ -f "$token_file" ]; then
+    # The helper reads the token file at fetch time, so the token never appears on a command line.
+    auth=(-c credential.helper= -c "credential.helper=!f() { test \"\$1\" = get || exit 0; echo username=x-access-token; printf 'password=%s\\n' \"\$(cat '$token_file')\"; }; f")
+  fi
+  env GIT_TERMINAL_PROMPT=0 ${HOST_PROXY:+https_proxy="$HOST_PROXY"} \
+    git -C "$mirror" "${auth[@]}" fetch --quiet --prune origin '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'
 }
 
 ensure_image() {
@@ -449,7 +480,7 @@ cmd_status() {
   check 'Verdaccio :4873' curl --fail --silent --max-time 5 http://192.168.122.1:4873/-/ping
   check 'Docker Hub mirror :5000' curl --fail --silent --max-time 5 http://192.168.122.1:5000/v2/
   check 'apt cache :3142' curl --fail --silent --max-time 5 --output /dev/null http://192.168.122.1:3142/acng-report.html
-  check 'git cache (filled by jobs)' test -d "$cache_root/git/mirror.git/objects"
+  check 'git cache (fetched when jobs start)' bash -c "git -C '$cache_root/git/mirror.git' for-each-ref --count=1 | grep --quiet ."
   check 'NFS export /srv/ci-cache' bash -c 'sudo exportfs -v | grep --quiet /srv/ci-cache'
   check 'cache folders writable by VMs (uid 1000)' bash -c \
     "test -z \"\$(sudo find '$cache_root'/{pnpm,pnpm-cache,npm,toolcache,go-mod,pip,uv} -maxdepth 0 ! -uid 1000)\""
@@ -606,5 +637,6 @@ case "${1:-}" in
   log) cmd_log ;;
   update) cmd_update ;;
   clean) cmd_clean ;;
+  git-fetch) cmd_git_fetch ;;
   *) die "unknown command: $1 (use: up, status, log, stop, github, proxy, runners, image, update, rebuild, clean)" ;;
 esac
