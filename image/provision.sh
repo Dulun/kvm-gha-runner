@@ -52,6 +52,7 @@ apt_extra=()
 has_tool python && apt_extra+=(python3 python3-pip python3-venv)
 has_tool shellcheck && apt_extra+=(shellcheck)
 has_tool skopeo && apt_extra+=(skopeo)
+has_tool psql && apt_extra+=(postgresql-client)
 has_tool openslide && apt_extra+=(openslide-tools)
 apt-get update
 apt-get install --yes --no-install-recommends \

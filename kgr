@@ -44,7 +44,7 @@ need_tty() { [ -t 0 ] || die "this needs answers: run kgr in a terminal."; }
 GITHUB_URL='' GITHUB_APP_CLIENT_ID='' GITHUB_APP_INSTALLATION_ID=''
 RUNNER_LABELS='kvm-runner-set' RUNNER_MIN='2' RUNNER_MAX='8' RUNNER_CPUS='2' RUNNER_MEMORY_GIB='4' RUNNER_DISK_GIB='20' RUNNER_KEEP_FAILED='2'
 GOLDEN_VOLUME='kvm-gha-slim-v1.qcow2' GUEST_USER='runner'
-IMAGE_TOOLS='node python go supabase' IMAGE_DOCKER_IMAGES=''
+IMAGE_TOOLS='node python go supabase skopeo psql' IMAGE_DOCKER_IMAGES=''
 # Tools that can be baked into the golden image: ID, description. Versions live in image/provision.sh.
 readonly image_tool_catalog=(
   node 'Node.js LTS with pnpm (npm and pnpm use the Verdaccio cache)'
@@ -56,6 +56,7 @@ readonly image_tool_catalog=(
   actionlint 'actionlint (GitHub workflow linter)'
   shellcheck 'ShellCheck'
   skopeo 'skopeo (copy container images)'
+  psql 'PostgreSQL client (psql, pg_dump)'
   openslide 'OpenSlide tools'
   aliyun 'Alibaba Cloud CLI'
 )

@@ -59,7 +59,7 @@ Steps for the agent. Run everything as the human's normal user, not root.
    RUNNER_DISK_GIB=20
    GOLDEN_VOLUME=kvm-gha-slim-v1.qcow2
    GUEST_USER=runner
-   IMAGE_TOOLS='node python go supabase'
+   IMAGE_TOOLS='node python go supabase skopeo psql'
    IMAGE_DOCKER_IMAGES=''
    HOST_PROXY=http://127.0.0.1:7897
    GUEST_PROXY=http://192.168.122.1:7897
@@ -101,8 +101,10 @@ Don't edit files in the repository, run `kgr rebuild` or delete images or caches
 
   | Tool | Default |
   | --- | --- |
-  | Node.js LTS with pnpm, Python 3 (pip, venv, uv), Go, Supabase CLI | on |
-  | Docker images of the local Supabase stack, Deno, actionlint, ShellCheck, skopeo, OpenSlide, Alibaba Cloud CLI | off |
+  | Node.js LTS with pnpm, Python 3 (pip, venv, uv), Go, Supabase CLI, skopeo, PostgreSQL client | on |
+  | Docker images of the local Supabase stack, Deno, actionlint, ShellCheck, OpenSlide, Alibaba Cloud CLI | off |
+
+  Bake in anything your workflows would otherwise `apt install`: jobs then skip `apt update` entirely.
 
   You can also list any other Docker images to bake in. Baked tools are downloaded once, when the image is
   built; jobs find them already installed. Every download is pinned to a version and checksum in
