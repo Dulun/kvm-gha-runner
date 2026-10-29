@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -377,6 +378,11 @@ WantedBy=multi-user.target
 			runnerEnv += name + "=" + guestNoProxy + "\n"
 			dockerEnv += fmt.Sprintf("Environment=%q\n", name+"="+guestNoProxy)
 		}
+		// The Docker client copies "proxies" into every container it starts or builds
+		// (docker run, docker build RUN steps, compose), so job containers use the proxy too.
+		dockerClient, _ := json.Marshal(map[string]any{"proxies": map[string]any{"default": map[string]string{
+			"httpProxy": proxy, "httpsProxy": proxy, "noProxy": guestNoProxy,
+		}}})
 		proxyFiles = fmt.Sprintf(`  - path: /etc/default/kvm-actions-runner
     owner: root:root
     permissions: '0644'
@@ -387,8 +393,13 @@ WantedBy=multi-user.target
     permissions: '0644'
     encoding: b64
     content: %s
-`, encode(runnerEnv), encode(dockerEnv))
-		proxyCommands = "  - [ systemctl, try-restart, docker.service ]\n"
+  - path: /home/%[3]s/.docker/config.json
+    permissions: '0600'
+    encoding: b64
+    content: %[4]s
+`, encode(runnerEnv), encode(dockerEnv), user, encode(string(dockerClient)))
+		// write_files creates ~/.docker as root; docker login must be able to rewrite it.
+		proxyCommands = fmt.Sprintf("  - [ chown, -R, '%[1]s:%[1]s', /home/%[1]s/.docker ]\n  - [ systemctl, try-restart, docker.service ]\n", user)
 	}
 	return fmt.Sprintf(`#cloud-config
 write_files:

@@ -38,8 +38,10 @@ Workflows then use `runs-on: kvm-runner-set` (or the label you chose).
   | NFS `/srv/ci-cache` | mounted at `/mnt/ci-cache` | pnpm store, npm cache, Actions tool cache (`RUNNER_TOOL_CACHE`) |
 - **Proxy everywhere.**
   - `HOST_PROXY` covers apt, downloads, `go build`, the host's dockerd and cache misses.
-  - `GUEST_PROXY` is injected into every VM, for the runner, job steps and dockerd. It must listen on
-    `192.168.122.1`; in Clash, turn on *allow LAN*.
+  - `GUEST_PROXY` is injected into every VM: the runner and job steps (`HTTP(S)_PROXY`), dockerd (image
+    pulls) and the Docker client (`~/.docker/config.json` `proxies`), so containers from `docker run`,
+    `docker build` and compose use it too. It must listen on `192.168.122.1`; in Clash, turn on *allow LAN*.
+  - The host caches and private ranges (`192.168.0.0/16`, `10.0.0.0/8`, `172.16.0.0/12`) bypass the proxy.
 
 ## Menu
 
