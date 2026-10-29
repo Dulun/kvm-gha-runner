@@ -22,6 +22,68 @@ It shows you exactly what to create on GitHub. Later runs ask nothing.
 
 Workflows then use `runs-on: kvm-runner-set` (or the label you chose).
 
+## Set up with an agent
+
+Or let a coding agent (Claude Code, Codex, …) running on the runner host do it. Paste this, with your
+repository filled in:
+
+```text
+Set up ephemeral GitHub Actions runners on this machine with https://github.com/Dulun/kvm-gha-runner
+for the repository https://github.com/OWNER/REPO. Clone it to ~/kvm-gha-runner (or git pull --ff-only
+if it is there) and follow the "Set up with an agent" section of its README step by step. Never ask me
+to paste the GitHub token or key to you; I enter it myself.
+```
+
+Steps for the agent. Run everything as the human's normal user, not root.
+
+1. **Check the host.**
+   - It must be Ubuntu 24.04 (`. /etc/os-release`), and `/dev/kvm` must exist.
+   - `sudo -n true` must succeed. If sudo asks for a password, ask the human to run this in their own
+     terminal: `echo "$USER ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/kgr-setup`. Remind them
+     to remove it at the end.
+2. **Proxy.** Ask the human whether this host needs a proxy, for example Clash on port 7897.
+   - `HOST_PROXY` is the proxy as this host sees it, e.g. `http://127.0.0.1:7897`.
+   - `GUEST_PROXY` is the same port on `192.168.122.1`, e.g. `http://192.168.122.1:7897`. The proxy must
+     accept LAN connections (Clash: *allow LAN*).
+   - Leave both empty for a direct connection. Check `HOST_PROXY` with
+     `curl --proxy "$HOST_PROXY" -sfo /dev/null https://github.com`.
+3. **Write `~/.config/kvm-gha-runner/config.env`** (directory mode 0700, file mode 0600):
+   ```bash
+   GITHUB_URL=https://github.com/OWNER/REPO
+   RUNNER_LABELS=kvm-runner-set
+   RUNNER_MIN=1
+   RUNNER_MAX=8
+   RUNNER_CPUS=2
+   RUNNER_MEMORY_MIB=4096
+   GOLDEN_VOLUME=kvm-gha-slim-v1.qcow2
+   GUEST_USER=runner
+   HOST_PROXY=http://127.0.0.1:7897
+   GUEST_PROXY=http://192.168.122.1:7897
+   ```
+   Lower `RUNNER_MAX` so that `RUNNER_MAX × RUNNER_CPUS` fits `nproc`, and
+   `RUNNER_MAX × RUNNER_MEMORY_MIB` plus 4096 fits `free -m`.
+4. **GitHub access: the human does this part.**
+   - Ask them to create a fine-grained token at
+     <https://github.com/settings/personal-access-tokens/new>, limited to only this repository, with
+     Repository permissions → Administration: Read and write.
+   - Then ask them to run `~/kvm-gha-runner/kgr github` in their own terminal. It asks for the
+     repository URL (accept the default), then option `1`, then the token. Input is hidden, and the
+     token is checked against GitHub before it is saved.
+   - When they say it is done, confirm with `test -s ~/.config/kvm-gha-runner/github-token`. Never read,
+     print or copy that file or `github-app.pem`.
+5. **Run `~/kvm-gha-runner/kgr up` with output going to `~/kgr-up.log`.**
+   - The first run builds the image and can take 30–60 minutes, so run it in the background (or with a
+     long enough timeout) and follow the log.
+   - It asks nothing when the config is complete. A line starting with `STOP:` says what is wrong.
+   - If it stops after adding the user to the kvm/libvirt groups, ask the human to reboot. Then run it
+     again, in a new agent session if needed.
+   - Rerunning it is always safe.
+6. **Done** when `kgr status` shows no `FAIL` lines and the runner is listed at
+   `https://github.com/OWNER/REPO/settings/actions/runners`. Report that, and remind the human to remove
+   `/etc/sudoers.d/kgr-setup` if they created it.
+
+Don't edit files in the repository, run `kgr rebuild` or delete images or caches unless the human asks.
+
 ## What it does
 
 - **One VM per job.** A manager (Go, built from source here) listens to GitHub through the official

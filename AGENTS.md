@@ -60,6 +60,7 @@ shellcheck kgr image/*.sh
 (cd manager && GOWORK=off gofmt -l . && GOWORK=off go vet ./... && GOWORK=off go test -race ./...)
 ```
 
-**Don't run `kgr`, `image/build-image.sh` or anything with `sudo` unless the owner asks.** They
+**Don't run `kgr`, `image/build-image.sh` or anything with `sudo` unless the owner asks** (the setup prompt in
+README "Set up with an agent" is such a request; then follow that section exactly). They
 install packages, restart dockerd, create VMs and replace the running service on the real host. The owner
 runs them.

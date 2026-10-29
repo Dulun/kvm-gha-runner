@@ -190,7 +190,7 @@ ensure_packages() {
     fi
   done
   sudo loginctl enable-linger "$USER"
-  [ "$relogin" -eq 0 ] || die "added $USER to the kvm/libvirt groups: log out and back in, then run kgr again."
+  [ "$relogin" -eq 0 ] || die "added $USER to the kvm/libvirt groups: reboot (linger keeps the old user manager alive across a re-login), then run kgr up again."
 }
 
 ensure_libvirt() {
@@ -342,7 +342,10 @@ cmd_status() {
 
 cmd_up() {
   # First run: ask everything once (proxy first, the token check goes through it).
-  configured || { configure_proxy && configure_github && configure_runners; }
+  if ! configured; then
+    [ -t 0 ] || die "not configured: write $config and run 'kgr github' in a terminal (README: Set up with an agent)."
+    configure_proxy && configure_github && configure_runners
+  fi
   ensure_packages
   ensure_libvirt
   ensure_caches
