@@ -301,7 +301,7 @@ ensure_libvirt() {
 ensure_caches() {
   step 'Caches: Verdaccio :4873, Docker Hub :5000, mcr :5001, apt :3142, git, NFS /srv/ci-cache'
   local name project
-  sudo install -d "$cache_root"/{pnpm,pnpm-cache,npm,toolcache,go-mod,pip,uv,verdaccio,registry-hub,registry-mcr}
+  sudo install -d "$cache_root"/{pnpm,pnpm-cache,npm,toolcache,go-mod,pip,uv,verdaccio,registry-hub,registry-mcr,image-downloads}
   # VMs write as uid 1000 (all_squash): repair anything an older setup or a root process left behind.
   sudo find "$cache_root"/{pnpm,pnpm-cache,npm,toolcache,go-mod,pip,uv} ! -uid 1000 -exec chown 1000:1000 {} +
   sudo install -d "$cache_root/verdaccio/storage"
@@ -597,7 +597,7 @@ cmd_clean() {
   [[ "$answer" =~ ^[Yy] ]] || return 0
   systemctl --user stop kvm-gha-runner.service || true
   sudo env HOST_PROXY="$HOST_PROXY" docker compose --file "$repo/cache/compose.yaml" down
-  sudo find "$cache_root"/{pnpm,pnpm-cache,npm,toolcache,go-mod,pip,uv,apt,git,registry-hub,registry-mcr} "$cache_root/verdaccio/storage" -mindepth 1 -delete
+  sudo find "$cache_root"/{pnpm,pnpm-cache,npm,toolcache,go-mod,pip,uv,apt,git,registry-hub,registry-mcr,image-downloads} "$cache_root/verdaccio/storage" -mindepth 1 -delete
   cmd_up
 }
 

@@ -38,9 +38,16 @@ export DEBIAN_FRONTEND=noninteractive
 tmp="$(mktemp -d)"
 trap 'rm -rf -- "$tmp"' EXIT
 has_tool() { [[ " ${IMAGE_TOOLS:-} " == *" $1 "* ]]; }
-fetch() { # fetch URL FILE SHA256
+dl_cache='' # set once the host's NFS cache is mounted: downloads stay there for the next build
+fetch() { # fetch URL FILE SHA256 (from the download cache when it has a verified copy)
+  local cached="${dl_cache:+$dl_cache/${3:0:16}-${1##*/}}"
+  if [ -n "$cached" ] && [ -f "$cached" ] && echo "$3  $cached" | sha256sum --check --strict --quiet 2>/dev/null; then
+    cp -- "$cached" "$2"
+    return
+  fi
   curl --fail --location --silent --show-error "$1" --output "$2"
   echo "$3  $2" | sha256sum --check --strict --quiet
+  if [ -n "$cached" ]; then cp -- "$2" "$cached.partial" && mv -- "$cached.partial" "$cached" || true; fi
 }
 gh_release() { echo "https://github.com/$1/releases/download/$2"; }
 
@@ -54,10 +61,24 @@ has_tool shellcheck && apt_extra+=(shellcheck)
 has_tool skopeo && apt_extra+=(skopeo)
 has_tool psql && apt_extra+=(postgresql-client)
 has_tool openslide && apt_extra+=(openslide-tools)
+# apt through the host's apt-cacher-ng, so rebuilds reuse every package; https sources keep the build proxy.
+if curl --silent --max-time 5 --output /dev/null "http://${cache_host}:3142/"; then
+  {
+    printf 'Acquire::http::Proxy "http://%s:3142";\n' "$cache_host"
+    [ -z "$BUILD_PROXY" ] || printf 'Acquire::https::Proxy "%s";\n' "$BUILD_PROXY"
+  } >/etc/apt/apt.conf.d/99kvm-gha-build-cache
+fi
 apt-get update
 apt-get install --yes --no-install-recommends \
   build-essential ca-certificates curl docker-buildx docker-compose-v2 docker.io gh git jq \
   nfs-common qemu-guest-agent rsync unzip xz-utils zip "${apt_extra[@]}"
+
+# Tarballs below are kept on the host's NFS cache (/srv/ci-cache/image-downloads); without it they download.
+install -d /run/kgr-ci-cache
+if mount -t nfs4 -o soft,timeo=50,retrans=2 "${cache_host}:/srv/ci-cache" /run/kgr-ci-cache 2>/dev/null &&
+  install -d /run/kgr-ci-cache/image-downloads 2>/dev/null; then
+  dl_cache=/run/kgr-ci-cache/image-downloads
+fi
 usermod -aG docker "$GUEST_USER"
 install -d -m 0755 /etc/docker
 cat >/etc/docker/daemon.json <<EOF
@@ -87,10 +108,8 @@ printf 'storeDir: %s/pnpm\ncacheDir: %s/pnpm-cache\n' "$cache_root" "$cache_root
 printf 'registry=%s\n' "$registry" >"$home/.npmrc"
 chown "$GUEST_USER:$GUEST_USER" "$home/.config/pnpm/config.yaml" "$home/.npmrc"
 
-curl --fail --location --silent --show-error \
-  "https://github.com/actions/runner/releases/download/v${runner_version}/actions-runner-linux-x64-${runner_version}.tar.gz" \
-  --output "$tmp/runner.tar.gz"
-echo "${runner_sha256}  $tmp/runner.tar.gz" | sha256sum --check --strict --quiet
+fetch "$(gh_release actions/runner "v$runner_version")/actions-runner-linux-x64-${runner_version}.tar.gz" \
+  "$tmp/runner.tar.gz" "$runner_sha256"
 install -d -o "$GUEST_USER" -g "$GUEST_USER" /opt/actions-runner
 tar --extract --gzip --file "$tmp/runner.tar.gz" --directory /opt/actions-runner
 /opt/actions-runner/bin/installdependencies.sh
@@ -184,7 +203,8 @@ runuser -u "$GUEST_USER" -- /opt/actions-runner/bin/Runner.Listener --version
 printf 'Acquire::http::Proxy "http://%s:3142";\n' "$cache_host" >/etc/apt/apt.conf.d/01kvm-gha-cache
 
 # Leave nothing build-specific behind: no build proxy, no apt lists, no host keys, fresh machine-id.
-rm -f /etc/apt/apt.conf.d/90cloud-init-aptproxy /root/kvm-gha-build.env
+rm -f /etc/apt/apt.conf.d/90cloud-init-aptproxy /etc/apt/apt.conf.d/99kvm-gha-build-cache /root/kvm-gha-build.env
+umount /run/kgr-ci-cache 2>/dev/null || true
 apt-get clean
 rm -rf /var/lib/apt/lists/* /etc/ssh/ssh_host_* /var/lib/systemd/random-seed
 journalctl --rotate >/dev/null 2>&1 || true
