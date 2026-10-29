@@ -323,7 +323,11 @@ ensure_caches() {
   sudo install -d /etc/exports.d
   sudo install -m 0644 "$repo/cache/exports" /etc/exports.d/kvm-gha-cache.exports
   sudo rm -f /etc/exports.d/ci-cache.exports
+  # Ubuntu's 8 server threads saturate when several jobs use the cache at once, and then every VM stalls.
+  sudo install -d /etc/nfs.conf.d
+  printf '[nfsd]\nthreads=64\n' | sudo tee /etc/nfs.conf.d/kvm-gha.conf >/dev/null
   sudo systemctl enable --now nfs-server.service
+  sudo rpc.nfsd 64 # applies now; a restart would start a 90 s NFSv4 grace period that stalls running jobs
   sudo exportfs -ra
 
   # apt cache: Ubuntu's apt-cacher-ng, listening only for the VMs; misses go through HOST_PROXY.
@@ -476,6 +480,7 @@ cmd_status() {
   }
   check 'Verdaccio :4873' curl --fail --silent --max-time 5 http://192.168.122.1:4873/-/ping
   check 'Docker Hub mirror :5000' curl --fail --silent --max-time 5 http://192.168.122.1:5000/v2/
+  check 'NFS server threads >= 64' test "$(cat /proc/fs/nfsd/threads 2>/dev/null || echo 0)" -ge 64
   check 'mcr.microsoft.com mirror :5001' curl --fail --silent --max-time 5 http://192.168.122.1:5001/v2/
   check 'apt cache :3142' curl --fail --silent --max-time 5 --output /dev/null http://192.168.122.1:3142/acng-report.html
   check 'git cache (fetched when jobs start)' bash -c "git -C '$cache_root/git/mirror.git' for-each-ref --count=1 | grep --quiet ."
