@@ -30,12 +30,19 @@ ask() { # ask VAR "question" [default]
   read -r -p "$2${3:+ [$3]}: " answer
   printf -v "$1" '%s' "${answer:-${3:-}}"
 }
+ask_number() { # ask_number VAR "question" default min
+  while true; do
+    ask "$1" "$2" "$3"
+    [[ "${!1}" =~ ^[0-9]+$ ]] && [ "${!1}" -ge "$4" ] && return
+    echo "  Enter a whole number of at least $4."
+  done
+}
 need_tty() { [ -t 0 ] || die "this needs answers: run kgr in a terminal."; }
 
 # ---------------------------------------------------------------- config
 
 GITHUB_URL='' GITHUB_APP_CLIENT_ID='' GITHUB_APP_INSTALLATION_ID=''
-RUNNER_LABELS='kvm-runner-set' RUNNER_MIN='1' RUNNER_MAX='8' RUNNER_CPUS='2' RUNNER_MEMORY_MIB='4096'
+RUNNER_LABELS='kvm-runner-set' RUNNER_MIN='2' RUNNER_MAX='8' RUNNER_CPUS='2' RUNNER_MEMORY_GIB='4' RUNNER_DISK_GIB='20'
 GOLDEN_VOLUME='kvm-gha-slim-v1.qcow2' GUEST_USER='runner'
 HOST_PROXY='http://127.0.0.1:7897' GUEST_PROXY='http://192.168.122.1:7897'
 
@@ -44,6 +51,8 @@ load_config() {
     # shellcheck source=/dev/null
     source "$config"
   fi
+  # Configs written before RUNNER_MEMORY_GIB stored MiB.
+  [ -z "${RUNNER_MEMORY_MIB:-}" ] || RUNNER_MEMORY_GIB=$((RUNNER_MEMORY_MIB / 1024))
 }
 
 save_config() {
@@ -59,7 +68,8 @@ save_config() {
       "RUNNER_MIN=$RUNNER_MIN" \
       "RUNNER_MAX=$RUNNER_MAX" \
       "RUNNER_CPUS=$RUNNER_CPUS" \
-      "RUNNER_MEMORY_MIB=$RUNNER_MEMORY_MIB" \
+      "RUNNER_MEMORY_GIB=$RUNNER_MEMORY_GIB" \
+      "RUNNER_DISK_GIB=$RUNNER_DISK_GIB" \
       '# Change the name to build a fresh image on the next "up".' \
       "GOLDEN_VOLUME=$GOLDEN_VOLUME" \
       "GUEST_USER=$GUEST_USER" \
@@ -126,11 +136,17 @@ configure_proxy() {
 
 configure_runners() {
   need_tty
+  printf '\nThis host: %s CPUs, %s GiB memory, %s free for runner disks.\n' "$(nproc)" \
+    "$(awk '/^MemTotal:/ { print int($2 / 1048576) }' /proc/meminfo)" \
+    "$(df -h --output=avail /var/lib/libvirt/images 2>/dev/null | tail -n 1 | tr -d ' ' || echo '?')"
+  echo 'Runner disks are thin: they only use the space a job actually writes.'
   ask RUNNER_LABELS 'Runner label (workflows use runs-on: <label>)' "$RUNNER_LABELS"
-  ask RUNNER_MIN 'Idle runners kept warm' "$RUNNER_MIN"
-  ask RUNNER_MAX 'Maximum runners at once' "$RUNNER_MAX"
-  ask RUNNER_CPUS 'vCPUs per runner' "$RUNNER_CPUS"
-  ask RUNNER_MEMORY_MIB 'Memory per runner (MiB)' "$RUNNER_MEMORY_MIB"
+  [[ "$RUNNER_LABELS" =~ ^[A-Za-z0-9._-]+$ ]] || die "label may only use letters, digits, '.', '_' and '-'."
+  ask_number RUNNER_CPUS 'CPUs per runner' "$RUNNER_CPUS" 1
+  ask_number RUNNER_MEMORY_GIB 'Memory per runner (GiB)' "$RUNNER_MEMORY_GIB" 1
+  ask_number RUNNER_DISK_GIB 'Disk per runner (GiB)' "$RUNNER_DISK_GIB" 10
+  ask_number RUNNER_MIN 'Idle runners kept ready for jobs' "$RUNNER_MIN" 0
+  ask_number RUNNER_MAX 'Maximum runners at once' "$RUNNER_MAX" "$((RUNNER_MIN > 1 ? RUNNER_MIN : 1))"
   save_config
 }
 
@@ -259,7 +275,7 @@ manager_args() {
   args=(
     --url "$GITHUB_URL" --name "$RUNNER_LABELS" --labels "$RUNNER_LABELS" --runner-group default
     "${auth[@]}" --golden-volume "$GOLDEN_VOLUME" --guest-user "$GUEST_USER" --guest-http-proxy="$GUEST_PROXY"
-    --cpus "$RUNNER_CPUS" --memory-mib "$RUNNER_MEMORY_MIB" --min-runners "$RUNNER_MIN" --max-runners "$RUNNER_MAX"
+    --cpus "$RUNNER_CPUS" --memory-mib "$((RUNNER_MEMORY_GIB * 1024))" --disk-gib "$RUNNER_DISK_GIB" --min-runners "$RUNNER_MIN" --max-runners "$RUNNER_MAX"
   )
 }
 
@@ -373,14 +389,16 @@ cmd_rebuild() {
 }
 
 menu() {
-  local choice
+  local choice apply
   while true; do
     printf '\nkvm-gha-runner  %s\n' "${GITHUB_URL:-(not configured)}"
+    configured && printf '  runners: %s x (%s CPU, %s GiB, %s GiB disk), %s kept idle, label %s\n' \
+      "$RUNNER_MAX" "$RUNNER_CPUS" "$RUNNER_MEMORY_GIB" "$RUNNER_DISK_GIB" "$RUNNER_MIN" "$RUNNER_LABELS"
     printf '  1) Set up / start everything\n'
     printf '  2) Status\n'
     printf '  3) GitHub access (token or App)\n'
     printf '  4) Proxy\n'
-    printf '  5) Runner label and capacity\n'
+    printf '  5) Runners: CPU, memory, disk, count and label\n'
     printf '  6) Rebuild the golden image\n'
     printf '  7) Stop the runners\n'
     printf '  q) Quit\n'
@@ -396,7 +414,10 @@ menu() {
       q | Q) return ;;
       *) echo "unknown choice: $choice" ;;
     esac
-    case "$choice" in 3 | 4 | 5) printf 'Run option 1 to apply.\n' ;; esac
+    if [[ "$choice" =~ ^[345]$ ]]; then
+      ask apply 'Apply now? It restarts the runners, so jobs running right now may fail (Y/n)' 'Y'
+      if [[ "$apply" =~ ^[Nn] ]]; then echo 'Not applied. Option 1 applies it later.'; else cmd_up; fi
+    fi
   done
 }
 

@@ -16,7 +16,8 @@ The first run asks for:
 - your proxy (optional)
 - the repository the runners serve
 - a GitHub fine-grained token or a GitHub App
-- runner size and count
+- runner CPUs, memory and disk (default 2 CPUs, 4 GiB, 20 GiB), how many stay idle and ready (default 2)
+  and the most at once (default 8)
 
 It shows you exactly what to create on GitHub. Later runs ask nothing.
 
@@ -51,17 +52,19 @@ Steps for the agent. Run everything as the human's normal user, not root.
    ```bash
    GITHUB_URL=https://github.com/OWNER/REPO
    RUNNER_LABELS=kvm-runner-set
-   RUNNER_MIN=1
+   RUNNER_MIN=2
    RUNNER_MAX=8
    RUNNER_CPUS=2
-   RUNNER_MEMORY_MIB=4096
+   RUNNER_MEMORY_GIB=4
+   RUNNER_DISK_GIB=20
    GOLDEN_VOLUME=kvm-gha-slim-v1.qcow2
    GUEST_USER=runner
    HOST_PROXY=http://127.0.0.1:7897
    GUEST_PROXY=http://192.168.122.1:7897
    ```
    Lower `RUNNER_MAX` so that `RUNNER_MAX × RUNNER_CPUS` fits `nproc`, and
-   `RUNNER_MAX × RUNNER_MEMORY_MIB` plus 4096 fits `free -m`.
+   `RUNNER_MAX × RUNNER_MEMORY_GIB` plus 4 fits the host memory in GiB. Disks are thin, so
+   `RUNNER_DISK_GIB` only needs to fit what one job writes.
 4. **GitHub access: the human does this part.**
    - Ask them to create a fine-grained token at
      <https://github.com/settings/personal-access-tokens/new>, limited to only this repository, with
@@ -89,7 +92,7 @@ Don't edit files in the repository, run `kgr rebuild` or delete images or caches
 - **One VM per job.** A manager (Go, built from source here) listens to GitHub through the official
   [actions/scaleset](https://github.com/actions/scaleset) client. For each job it clones a fresh VM from a
   read-only golden image, registers it with a just-in-time config, and deletes the VM when the job ends.
-  `RUNNER_MIN` VMs are kept warm.
+  `RUNNER_MIN` VMs are kept idle and ready. Each VM gets its own CPUs, memory and a thin disk.
 - **Slim image, built unattended.** The image is official Ubuntu 24.04, signature-checked, plus `curl`,
   `git`, `gh`, `jq`, Docker (buildx, compose), Node 24, pnpm, Python 3 and the Actions runner.
   Workflows install anything else with the usual `setup-*` actions, and those downloads land in a shared
@@ -110,7 +113,8 @@ Don't edit files in the repository, run `kgr rebuild` or delete images or caches
 
 ## Menu
 
-`kgr` opens a menu. Each item is also a command:
+Just run `kgr`: everything is in its menu, and after a change it offers to apply it right away. Each item is
+also a command:
 
 | Command | What it does |
 | --- | --- |
@@ -118,11 +122,11 @@ Don't edit files in the repository, run `kgr rebuild` or delete images or caches
 | `kgr status` | Caches, image, service, proxy, running VMs and recent log |
 | `kgr github` | Change the token or App, e.g. when a token expires |
 | `kgr proxy` | Change the proxies |
-| `kgr runners` | Change the label, count, CPUs and memory |
+| `kgr runners` | Change CPUs, memory and disk per runner, idle and maximum count, label |
 | `kgr rebuild` | Build a new golden image (next version number) and switch to it |
 | `kgr stop` | Stop the runners |
 
-After `github`, `proxy` or `runners`, run `kgr up` to apply.
+From the menu, changes are applied when you confirm. With the commands, run `kgr up` afterwards.
 
 ## GitHub access
 

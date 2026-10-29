@@ -55,7 +55,7 @@ fi
 
 echo '==> Build VM disk and cloud-init seed'
 qemu-img convert -O qcow2 "$cache_dir/$image_file" "$build_disk"
-qemu-img resize "$build_disk" 40G >/dev/null
+qemu-img resize "$build_disk" 10G >/dev/null
 chown libvirt-qemu:kvm "$build_disk"
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

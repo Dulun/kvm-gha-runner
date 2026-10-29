@@ -79,6 +79,10 @@ func (l *LibvirtBackend) Start(ctx context.Context, record RunnerRecord, encoded
 	if err != nil {
 		return err
 	}
+	// A qcow2 overlay smaller than its backing image would cut the guest filesystem, so only grow it.
+	if want := uint64(l.cfg.DiskGiB) << 30; want > capacity {
+		capacity = want
+	}
 
 	createdDisk := false
 	createdSeed := false

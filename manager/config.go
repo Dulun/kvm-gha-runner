@@ -21,6 +21,7 @@ type Config struct {
 	MaxRunners          int
 	CPUs                int
 	MemoryMiB           int
+	DiskGiB             int
 	LibvirtURI          string
 	StoragePool         string
 	Network             string
@@ -58,6 +59,7 @@ func parseConfig(args []string) (Config, error) {
 	flags.IntVar(&cfg.MaxRunners, "max-runners", 2, "maximum concurrent runners")
 	flags.IntVar(&cfg.CPUs, "cpus", 4, "vCPUs per runner VM")
 	flags.IntVar(&cfg.MemoryMiB, "memory-mib", 8192, "memory per runner VM in MiB")
+	flags.IntVar(&cfg.DiskGiB, "disk-gib", 0, "disk per runner VM in GiB; never smaller than the golden image")
 	flags.StringVar(&cfg.LibvirtURI, "libvirt-uri", "qemu:///system", "libvirt connection URI")
 	flags.StringVar(&cfg.StoragePool, "storage-pool", "default", "libvirt storage pool")
 	flags.StringVar(&cfg.Network, "network", "default", "libvirt network")
@@ -119,6 +121,9 @@ func (c Config) Validate() error {
 	}
 	if c.MemoryMiB < 1024 {
 		return errors.New("--memory-mib must be at least 1024")
+	}
+	if c.DiskGiB < 0 || c.DiskGiB > 4096 {
+		return errors.New("--disk-gib must be between 0 and 4096")
 	}
 	if c.MaxRetainedFailed < 0 {
 		return errors.New("--max-retained-failed must not be negative")
