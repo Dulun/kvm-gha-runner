@@ -362,9 +362,6 @@ ensure_caches() {
   printf '%s\n' '[Unit]' 'Description=Fetch into the git cache when a job starts' '' '[Path]' \
     "PathChanged=$cache_root/git/fetch-request" '' '[Install]' 'WantedBy=default.target' \
     >"$units/kvm-gha-git-fetch.path"
-  # Earlier versions refreshed the mirror on a timer.
-  systemctl --user disable --now kvm-gha-git-sync.timer >/dev/null 2>&1 || true
-  rm -f "$units"/kvm-gha-git-sync.{service,timer}
   systemctl --user daemon-reload
   systemctl --user enable --now kvm-gha-git-fetch.path >/dev/null 2>&1
   systemctl --user start --no-block kvm-gha-git-fetch.service
