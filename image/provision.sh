@@ -100,7 +100,21 @@ printf '%s\n' \
   "RUNNER_TOOL_CACHE=$cache_root/toolcache" "AGENT_TOOLSDIRECTORY=$cache_root/toolcache" \
   "GOMODCACHE=$cache_root/go-mod" "PIP_CACHE_DIR=$cache_root/pip" \
   "UV_CACHE_DIR=$cache_root/uv" 'UV_LINK_MODE=copy' \
-  "GIT_ALTERNATE_OBJECT_DIRECTORIES=$cache_root/git/mirror.git/objects" >/opt/actions-runner/.env
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES=$cache_root/git/mirror.git/objects" \
+  'ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/opt/actions-runner/kgr-job-completed.sh' >/opt/actions-runner/.env
+# After each job, copy the git objects it fetched into the shared mirror; the next checkout borrows them.
+cat >/opt/actions-runner/kgr-job-completed.sh <<'HOOK'
+#!/usr/bin/env bash
+# Runner job-completed hook. Best effort: it never fails the job.
+mirror=/mnt/ci-cache/git/mirror.git
+work="${GITHUB_WORKSPACE:-}"
+if [ -d "$mirror/objects" ] && [ -n "$work" ] && git -C "$work" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
+  timeout 120 git -C "$mirror" fetch --quiet --no-tags --update-shallow "$work" \
+    "+HEAD:refs/kgr/${GITHUB_REPOSITORY:-repo}/${GITHUB_REF:-HEAD}" >/dev/null 2>&1 || true
+fi
+exit 0
+HOOK
+chmod 0755 /opt/actions-runner/kgr-job-completed.sh
 chown -R "$GUEST_USER:$GUEST_USER" /opt/actions-runner
 
 if has_tool go; then
