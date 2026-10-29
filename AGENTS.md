@@ -5,11 +5,11 @@ Rules for coding agents working in this repository. Human docs are in [README.md
 ## What this is
 
 One host runs ephemeral GitHub Actions runners: one KVM VM per job, cloned from a slim read-only golden
-image, with local caches and a proxy. `./start.sh` is the only entry point; everything else is called by it.
+image, with local caches and a proxy. `kgr` is the only entry point; everything else is called by it.
 
 | Path | Role |
 | --- | --- |
-| `start.sh` | menu and commands (`up`, `status`, `github`, `proxy`, `runners`, `rebuild`, `stop`); host setup, config, service |
+| `kgr` | menu and commands (`up`, `status`, `github`, `proxy`, `runners`, `rebuild`, `stop`); host setup, config, service |
 | `manager/` | Go scale-set manager (`actions/scaleset`): listens to GitHub, starts/cleans VMs, writes each VM's cloud-init |
 | `image/build-image.sh` | unattended golden image build: verified Ubuntu cloud image → build VM → flattened qcow2 |
 | `image/provision.sh` | what goes into the image (runs inside the build VM) |
@@ -23,7 +23,7 @@ Runtime state is outside the repo:
 
 ## Invariants
 
-- **One command.** `./start.sh up` must stay idempotent: safe to rerun after a reinstall, a reboot or a
+- **One command.** `kgr up` must stay idempotent: safe to rerun after a reinstall, a reboot or a
   `git pull`. It may only stop for things a human must provide, such as the token, App key or group re-login.
   Interactive questions are asked once, on first run or from the menu; `up` never asks when the config is complete.
 - **Proxy for every network call.**
@@ -43,7 +43,7 @@ Runtime state is outside the repo:
 
 ## Working here
 
-- Shell: `set -Eeuo pipefail`, quote everything, keep the style of `start.sh` (`step` / `warn` / `die`).
+- Shell: `set -Eeuo pipefail`, quote everything, keep the style of `kgr` (`step` / `warn` / `die`).
   Values that reach systemd `ExecStart` must not contain spaces (URLs, names, numbers only).
 - Go: standard library first; keep `manager/` dependency-free beyond `actions/scaleset`.
 - English everywhere: code, comments, messages and docs.
@@ -55,11 +55,11 @@ Runtime state is outside the repo:
 These are light and safe to run anywhere:
 
 ```bash
-bash -n start.sh image/*.sh
-shellcheck start.sh image/*.sh
+bash -n kgr image/*.sh
+shellcheck kgr image/*.sh
 (cd manager && GOWORK=off gofmt -l . && GOWORK=off go vet ./... && GOWORK=off go test -race ./...)
 ```
 
-**Don't run `start.sh`, `image/build-image.sh` or anything with `sudo` unless the owner asks.** They
+**Don't run `kgr`, `image/build-image.sh` or anything with `sudo` unless the owner asks.** They
 install packages, restart dockerd, create VMs and replace the running service on the real host. The owner
 runs them.

@@ -6,8 +6,11 @@ One command sets everything up; after that it runs by itself, including after a 
 ```bash
 git clone https://github.com/Dulun/kvm-gha-runner.git
 cd kvm-gha-runner
-./start.sh
+./kgr
 ```
+
+After that first run, `kgr` works from any directory. A new shell may be needed the first time
+`~/.local/bin` is created.
 
 The first run asks for:
 - your proxy (optional)
@@ -45,26 +48,26 @@ Workflows then use `runs-on: kvm-runner-set` (or the label you chose).
 
 ## Menu
 
-`./start.sh` opens a menu. Each item is also a command:
+`kgr` opens a menu. Each item is also a command:
 
 | Command | What it does |
 | --- | --- |
-| `./start.sh up` | Set up or repair everything and start the runners. Safe to rerun. |
-| `./start.sh status` | Caches, image, service, proxy, running VMs and recent log |
-| `./start.sh github` | Change the token or App, e.g. when a token expires |
-| `./start.sh proxy` | Change the proxies |
-| `./start.sh runners` | Change the label, count, CPUs and memory |
-| `./start.sh rebuild` | Build a new golden image (next version number) and switch to it |
-| `./start.sh stop` | Stop the runners |
+| `kgr up` | Set up or repair everything and start the runners. Safe to rerun. |
+| `kgr status` | Caches, image, service, proxy, running VMs and recent log |
+| `kgr github` | Change the token or App, e.g. when a token expires |
+| `kgr proxy` | Change the proxies |
+| `kgr runners` | Change the label, count, CPUs and memory |
+| `kgr rebuild` | Build a new golden image (next version number) and switch to it |
+| `kgr stop` | Stop the runners |
 
-After `github`, `proxy` or `runners`, run `./start.sh up` to apply.
+After `github`, `proxy` or `runners`, run `kgr up` to apply.
 
 ## GitHub access
 
 - **Fine-grained token (simplest):** create it at <https://github.com/settings/personal-access-tokens/new>.
   - Repository access: only the repository the runners serve.
   - Permissions: Repository → Administration: Read and write. Metadata: Read-only is added automatically.
-  - When the token expires, runners stop registering. Run `./start.sh github` to paste a new one.
+  - When the token expires, runners stop registering. Run `kgr github` to paste a new one.
 - **GitHub App (never expires):** Administration: Read and write, webhook off, installed on the
   repository. You need the App ID, the Installation ID and the downloaded private key.
 
@@ -72,14 +75,14 @@ Secrets stay in `~/.config/kvm-gha-runner/` with mode 0600 and are never printed
 
 ## Requirements
 
-- Ubuntu 24.04 host with KVM (`/dev/kvm`) and sudo. `start.sh` installs the packages it needs.
+- Ubuntu 24.04 host with KVM (`/dev/kvm`) and sudo. `kgr` installs the packages it needs.
 - The libvirt default network on `192.168.122.1`, which is the libvirt default.
 - Disk: about 3 GB for the image, plus the caches as they grow.
 
 ## Files
 
 ```
-start.sh              setup, menu and commands
+kgr                   setup, menu and commands
 manager/              the scale-set manager (Go)
 image/build-image.sh  unattended golden image build (Ubuntu cloud image + cloud-init)
 image/provision.sh    what goes into the image

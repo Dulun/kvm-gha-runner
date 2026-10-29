@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # kvm-gha-runner: one script to set up, run and manage ephemeral KVM GitHub Actions runners on this host.
-#   ./start.sh            interactive menu (first run walks through every question)
-#   ./start.sh up         set up / repair everything and start the runners (safe to rerun any time)
-#   ./start.sh status | stop | github | proxy | runners | rebuild
+#   kgr            interactive menu (first run walks through every question)
+#   kgr up         set up / repair everything and start the runners (safe to rerun any time)
+#   kgr status | stop | github | proxy | runners | rebuild
 # Run as the user that owns the runners (not root); sudo is used where needed.
 set -Eeuo pipefail
 
-repo="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd)"
 readonly repo
 readonly config_dir="$HOME/.config/kvm-gha-runner"
 readonly config="$config_dir/config.env"
@@ -30,7 +30,7 @@ ask() { # ask VAR "question" [default]
   read -r -p "$2${3:+ [$3]}: " answer
   printf -v "$1" '%s' "${answer:-${3:-}}"
 }
-need_tty() { [ -t 0 ] || die "this needs answers: run ./start.sh in a terminal."; }
+need_tty() { [ -t 0 ] || die "this needs answers: run kgr in a terminal."; }
 
 # ---------------------------------------------------------------- config
 
@@ -51,7 +51,7 @@ save_config() {
   (
     umask 077
     printf '%s\n' \
-      '# Written by ./start.sh. Edit and run ./start.sh up, or use the menu.' \
+      '# Written by kgr. Edit and run kgr up, or use the menu.' \
       "GITHUB_URL=$GITHUB_URL" \
       "GITHUB_APP_CLIENT_ID=$GITHUB_APP_CLIENT_ID" \
       "GITHUB_APP_INSTALLATION_ID=$GITHUB_APP_INSTALLATION_ID" \
@@ -83,7 +83,7 @@ configure_github() {
     printf '  - Repository access: Only select repositories -> %s\n' "$repo_path"
     printf '  - Permissions -> Repository permissions -> Administration: Read and write\n'
     printf '    (Metadata: Read-only is added automatically; nothing else is needed)\n'
-    printf '  - Expiration: your choice. When it expires, runners stop registering: rerun ./start.sh github.\n\n'
+    printf '  - Expiration: your choice. When it expires, runners stop registering: rerun kgr github.\n\n'
     read -r -s -p 'Paste the token (hidden): ' token
     echo
     [ -n "$token" ] || die 'empty token.'
@@ -190,7 +190,7 @@ ensure_packages() {
     fi
   done
   sudo loginctl enable-linger "$USER"
-  [ "$relogin" -eq 0 ] || die "added $USER to the kvm/libvirt groups: log out and back in, then run ./start.sh again."
+  [ "$relogin" -eq 0 ] || die "added $USER to the kvm/libvirt groups: log out and back in, then run kgr again."
 }
 
 ensure_libvirt() {
@@ -398,6 +398,9 @@ menu() {
 }
 
 [ "$(id -u)" -ne 0 ] || die 'run as the runner owner, not root; sudo is used where needed.'
+# After the first ./kgr, plain `kgr` works from anywhere (~/.local/bin is on Ubuntu's default PATH).
+install -d "$HOME/.local/bin"
+ln -sfn "$repo/kgr" "$HOME/.local/bin/kgr"
 load_config
 case "${1:-}" in
   '') need_tty && menu ;;
