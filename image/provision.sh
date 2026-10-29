@@ -179,7 +179,14 @@ if has_tool supabase-stack || [ -n "${IMAGE_DOCKER_IMAGES:-}" ]; then
     systemctl daemon-reload
   fi
   systemctl restart docker.service
-  for image in ${IMAGE_DOCKER_IMAGES:-}; do docker pull --quiet "$image"; done
+  for image in ${IMAGE_DOCKER_IMAGES:-}; do
+    # mcr.microsoft.com through the host's :5001 cache (no TLS timeouts, shared with jobs). Jobs pull
+    # the same cache name by digest, so they then only fetch the manifest: the layers are already here.
+    if [[ "$image" == mcr.microsoft.com/* ]] && docker pull --quiet "${cache_host}:5001/${image#mcr.microsoft.com/}"; then
+      continue
+    fi
+    docker pull --quiet "$image"
+  done
   if has_tool supabase-stack; then
     # Starting a throwaway project pulls exactly the images this CLI version uses; jobs on the baked CLI reuse them.
     install -d "$tmp/supabase-project"
