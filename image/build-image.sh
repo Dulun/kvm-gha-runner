@@ -154,8 +154,12 @@ until [ "$(LC_ALL=C "${virsh_cmd[@]}" domstate "$build_name" 2>/dev/null)" = 'sh
   [ -z "$report" ] || read -r _ percent label <<<"$report"
   elapsed=$((SECONDS - started))
   if [ -t 1 ]; then
-    bar="$(printf '%*s' $((percent * 30 / 100)) '' | tr ' ' '#')"
-    printf '\r  [%-30s] %3d%%  %-42.42s %2dm%02ds' "$bar" "$percent" "$label" $((elapsed / 60)) $((elapsed % 60))
+    # The newest console line shows the step is moving (boot messages, apt Get: lines, ...).
+    latest="$(tail -c 4096 "$console_log" 2>/dev/null | tr -d '\r' | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' |
+      grep -a -v -e '^[[:space:]]*$' -e '^KGR-PROGRESS ' | tail -n 1 | tr -cd '[:print:]' || true)"
+    bar="$(printf '%*s' $((percent * 20 / 100)) '' | tr ' ' '#')"
+    line="$(printf '  [%-20s] %3d%% %2dm%02ds  %s: %s' "$bar" "$percent" $((elapsed / 60)) $((elapsed % 60)) "$label" "$latest")"
+    printf '\r%.*s\033[K' "$(($(tput cols 2>/dev/null || echo 100) - 1))" "$line"
   elif [ "$label" != "$shown" ]; then
     printf '  %3d%%  %s\n' "$percent" "$label"
   fi
