@@ -1,0 +1,412 @@
+#!/usr/bin/env bash
+# kvm-gha-runner: one script to set up, run and manage ephemeral KVM GitHub Actions runners on this host.
+#   ./start.sh            interactive menu (first run walks through every question)
+#   ./start.sh up         set up / repair everything and start the runners (safe to rerun any time)
+#   ./start.sh status | stop | github | proxy | runners | rebuild
+# Run as the user that owns the runners (not root); sudo is used where needed.
+set -Eeuo pipefail
+
+repo="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly repo
+readonly config_dir="$HOME/.config/kvm-gha-runner"
+readonly config="$config_dir/config.env"
+readonly pem="$config_dir/github-app.pem"
+readonly token_file="$config_dir/github-token"
+readonly bin="$HOME/.local/bin/kvm-gha-runner"
+readonly unit="$HOME/.config/systemd/user/kvm-gha-runner.service"
+readonly cache_root='/srv/ci-cache'
+readonly go_version='1.26.3'
+readonly go_sha256='2b2cfc7148493da5e73981bffbf3353af381d5f93e789c82c79aff64962eb556'
+virsh_cmd=(virsh --connect qemu:///system)
+
+step() { printf '\n==> %s\n' "$*"; }
+warn() { printf 'WARN: %s\n' "$*" >&2; }
+die() {
+  printf '\nSTOP: %s\n' "$*" >&2
+  exit 1
+}
+ask() { # ask VAR "question" [default]
+  local answer
+  read -r -p "$2${3:+ [$3]}: " answer
+  printf -v "$1" '%s' "${answer:-${3:-}}"
+}
+need_tty() { [ -t 0 ] || die "this needs answers: run ./start.sh in a terminal."; }
+
+# ---------------------------------------------------------------- config
+
+GITHUB_URL='' GITHUB_APP_CLIENT_ID='' GITHUB_APP_INSTALLATION_ID=''
+RUNNER_LABELS='kvm-runner-set' RUNNER_MIN='1' RUNNER_MAX='8' RUNNER_CPUS='2' RUNNER_MEMORY_MIB='4096'
+GOLDEN_VOLUME='kvm-gha-slim-v1.qcow2' GUEST_USER='runner'
+HOST_PROXY='http://127.0.0.1:7897' GUEST_PROXY='http://192.168.122.1:7897'
+
+load_config() {
+  if [ -f "$config" ]; then
+    # shellcheck source=/dev/null
+    source "$config"
+  fi
+}
+
+save_config() {
+  install -d -m 0700 "$config_dir"
+  (
+    umask 077
+    printf '%s\n' \
+      '# Written by ./start.sh. Edit and run ./start.sh up, or use the menu.' \
+      "GITHUB_URL=$GITHUB_URL" \
+      "GITHUB_APP_CLIENT_ID=$GITHUB_APP_CLIENT_ID" \
+      "GITHUB_APP_INSTALLATION_ID=$GITHUB_APP_INSTALLATION_ID" \
+      "RUNNER_LABELS=$RUNNER_LABELS" \
+      "RUNNER_MIN=$RUNNER_MIN" \
+      "RUNNER_MAX=$RUNNER_MAX" \
+      "RUNNER_CPUS=$RUNNER_CPUS" \
+      "RUNNER_MEMORY_MIB=$RUNNER_MEMORY_MIB" \
+      '# Change the name to build a fresh image on the next "up".' \
+      "GOLDEN_VOLUME=$GOLDEN_VOLUME" \
+      "GUEST_USER=$GUEST_USER" \
+      "HOST_PROXY=$HOST_PROXY" \
+      "GUEST_PROXY=$GUEST_PROXY" >"$config"
+  )
+  echo "Saved $config"
+}
+
+configured() { [ -n "$GITHUB_URL" ] && { [ -f "$token_file" ] || [ -f "$pem" ]; }; }
+
+configure_github() {
+  need_tty
+  ask GITHUB_URL 'Repository the runners serve (https://github.com/OWNER/REPO)' "$GITHUB_URL"
+  [[ "$GITHUB_URL" =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "not a repository URL: $GITHUB_URL"
+  local repo_path="${GITHUB_URL#https://github.com/}" auth token status pem_source
+  printf '\nGitHub access:\n  1) Fine-grained personal access token (simplest)\n  2) GitHub App (never expires, more steps)\n'
+  ask auth 'Choose' '1'
+  if [ "$auth" = '1' ]; then
+    printf '\nCreate the token at https://github.com/settings/personal-access-tokens/new\n'
+    printf '  - Repository access: Only select repositories -> %s\n' "$repo_path"
+    printf '  - Permissions -> Repository permissions -> Administration: Read and write\n'
+    printf '    (Metadata: Read-only is added automatically; nothing else is needed)\n'
+    printf '  - Expiration: your choice. When it expires, runners stop registering: rerun ./start.sh github.\n\n'
+    read -r -s -p 'Paste the token (hidden): ' token
+    echo
+    [ -n "$token" ] || die 'empty token.'
+    status="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 20 \
+      ${HOST_PROXY:+--proxy "$HOST_PROXY"} --header "Authorization: Bearer $token" \
+      "https://api.github.com/repos/$repo_path/actions/runners" || true)"
+    [ "$status" = '200' ] ||
+      die "this token cannot manage runners on $repo_path (GitHub answered HTTP $status): check repository access and Administration: Read and write."
+    install -d -m 0700 "$config_dir"
+    (umask 077 && printf '%s\n' "$token" >"$token_file")
+    unset token
+    rm -f -- "$pem"
+    GITHUB_APP_CLIENT_ID='' GITHUB_APP_INSTALLATION_ID=''
+    echo 'Token works and is saved (mode 0600).'
+  else
+    printf '\nCreate the app at https://github.com/settings/apps/new\n'
+    printf '  - Webhook: off. Repository permissions -> Administration: Read and write\n'
+    printf '  - Generate a private key (downloads a .pem), then "Install App" on %s\n' "$repo_path"
+    printf '  - App ID: on the app page. Installation ID: the number at the end of the installation page URL.\n\n'
+    ask GITHUB_APP_CLIENT_ID 'App ID' "$GITHUB_APP_CLIENT_ID"
+    ask GITHUB_APP_INSTALLATION_ID 'Installation ID' "$GITHUB_APP_INSTALLATION_ID"
+    [[ "$GITHUB_APP_CLIENT_ID$GITHUB_APP_INSTALLATION_ID" =~ ^[A-Za-z0-9.]+$ ]] || die 'App ID and Installation ID are required.'
+    ask pem_source 'Path to the downloaded .pem'
+    [ -f "$pem_source" ] || die "no such file: $pem_source"
+    install -d -m 0700 "$config_dir"
+    install -m 0600 "$pem_source" "$pem"
+    rm -f -- "$token_file"
+  fi
+  save_config
+}
+
+configure_proxy() {
+  need_tty
+  printf '\nProxy (e.g. Clash). Leave empty for a direct connection.\n'
+  ask HOST_PROXY 'Proxy this host uses (cache misses, downloads)' "$HOST_PROXY"
+  ask GUEST_PROXY 'Proxy runner VMs use: must listen on 192.168.122.1 (Clash "allow LAN")' "$GUEST_PROXY"
+  check_proxy
+  save_config
+}
+
+configure_runners() {
+  need_tty
+  ask RUNNER_LABELS 'Runner label (workflows use runs-on: <label>)' "$RUNNER_LABELS"
+  ask RUNNER_MIN 'Idle runners kept warm' "$RUNNER_MIN"
+  ask RUNNER_MAX 'Maximum runners at once' "$RUNNER_MAX"
+  ask RUNNER_CPUS 'vCPUs per runner' "$RUNNER_CPUS"
+  ask RUNNER_MEMORY_MIB 'Memory per runner (MiB)' "$RUNNER_MEMORY_MIB"
+  save_config
+}
+
+check_proxy() {
+  local name value
+  for name in HOST_PROXY GUEST_PROXY; do
+    value="${!name}"
+    [ -n "$value" ] || continue
+    if curl --silent --fail --max-time 15 --proxy "$value" --output /dev/null https://github.com; then
+      echo "  ok    $name $value"
+    else
+      warn "$name=$value cannot reach github.com (is the proxy running? GUEST_PROXY also needs allow LAN)"
+    fi
+  done
+}
+
+# ---------------------------------------------------------------- host
+
+ensure_packages() {
+  step 'Packages and groups'
+  local packages=(
+    ca-certificates cloud-image-utils curl git gpgv jq libvirt-clients libvirt-daemon-system
+    nfs-kernel-server ovmf qemu-kvm qemu-utils ubuntu-cloudimage-keyring virtinst
+  ) missing=() package group relogin=0
+  # Docker CE conflicts with docker.io: keep whichever Docker is already installed.
+  command -v docker >/dev/null 2>&1 || packages+=(docker.io)
+  docker compose version >/dev/null 2>&1 || packages+=(docker-compose-v2)
+  for package in "${packages[@]}"; do
+    dpkg-query --show --showformat='${Status}' "$package" 2>/dev/null | grep --quiet 'install ok installed' ||
+      missing+=("$package")
+  done
+  if [ "${#missing[@]}" -gt 0 ]; then
+    sudo env ${HOST_PROXY:+http_proxy="$HOST_PROXY" https_proxy="$HOST_PROXY"} apt-get update
+    sudo env ${HOST_PROXY:+http_proxy="$HOST_PROXY" https_proxy="$HOST_PROXY"} apt-get install --yes "${missing[@]}"
+  fi
+  sudo systemctl enable --now libvirtd.service docker.service
+  # dockerd ignores shell proxy variables: give it HOST_PROXY so the cache images pull through it.
+  local dropin='/etc/systemd/system/docker.service.d/kvm-gha-proxy.conf' wanted=''
+  if [ -n "$HOST_PROXY" ]; then
+    wanted="$(printf '[Service]\nEnvironment="HTTP_PROXY=%s" "HTTPS_PROXY=%s" "NO_PROXY=localhost,127.0.0.1,192.168.122.0/24"\n' \
+      "$HOST_PROXY" "$HOST_PROXY")"
+  fi
+  if [ "$wanted" != "$(sudo cat "$dropin" 2>/dev/null || true)" ]; then
+    if [ -n "$wanted" ]; then
+      sudo install -d /etc/systemd/system/docker.service.d
+      printf '%s\n' "$wanted" | sudo tee "$dropin" >/dev/null
+    else
+      sudo rm -f "$dropin"
+    fi
+    sudo systemctl daemon-reload
+    sudo systemctl restart docker.service
+  fi
+  for group in kvm libvirt; do
+    if ! id -nG "$USER" | tr ' ' '\n' | grep --quiet --line-regexp "$group"; then
+      sudo usermod -aG "$group" "$USER"
+      relogin=1
+    fi
+  done
+  sudo loginctl enable-linger "$USER"
+  [ "$relogin" -eq 0 ] || die "added $USER to the kvm/libvirt groups: log out and back in, then run ./start.sh again."
+}
+
+ensure_libvirt() {
+  step 'libvirt pool and network'
+  if ! "${virsh_cmd[@]}" pool-info default >/dev/null 2>&1; then
+    sudo install -d -o libvirt-qemu -g kvm -m 0770 /var/lib/libvirt/images
+    "${virsh_cmd[@]}" pool-define-as default dir --target /var/lib/libvirt/images >/dev/null
+  fi
+  "${virsh_cmd[@]}" pool-start default >/dev/null 2>&1 || true
+  "${virsh_cmd[@]}" pool-autostart default >/dev/null
+  if ! "${virsh_cmd[@]}" net-info default >/dev/null 2>&1; then
+    "${virsh_cmd[@]}" net-define /usr/share/libvirt/networks/default.xml >/dev/null
+  fi
+  "${virsh_cmd[@]}" net-start default >/dev/null 2>&1 || true
+  "${virsh_cmd[@]}" net-autostart default >/dev/null
+  ip -4 addr show dev virbr0 2>/dev/null | grep --quiet 'inet 192\.168\.122\.1/' ||
+    die 'virbr0 is not 192.168.122.1: the caches and the guest proxy assume that address.'
+}
+
+ensure_caches() {
+  step 'Caches: Verdaccio :4873, Docker Hub mirror :5000, NFS /srv/ci-cache'
+  local name project
+  sudo install -d "$cache_root"/{pnpm,pnpm-cache,npm,toolcache,verdaccio,registry-hub}
+  sudo chown 1000:1000 "$cache_root"/{pnpm,pnpm-cache,npm,toolcache}
+  sudo install -d -o 10001 -g 10001 "$cache_root/verdaccio/storage"
+  if [ -n "$HOST_PROXY" ]; then
+    sed -e "s#^http_proxy: .*#http_proxy: $HOST_PROXY#" -e "s#^https_proxy: .*#https_proxy: $HOST_PROXY#" \
+      "$repo/cache/verdaccio/config.yaml"
+  else
+    grep --invert-match --extended-regexp '^https?_proxy: ' "$repo/cache/verdaccio/config.yaml"
+  fi | sudo tee "$cache_root/verdaccio/config.yaml" >/dev/null
+  # Same-named containers from an older setup would block compose; their data lives in bind mounts.
+  for name in ci-verdaccio ci-registry-hub ci-registry-cache; do
+    sudo docker inspect "$name" >/dev/null 2>&1 || continue
+    project="$(sudo docker inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' "$name")"
+    [ "$project" = 'kvm-gha-cache' ] || sudo docker rm --force "$name" >/dev/null
+  done
+  sudo env HOST_PROXY="$HOST_PROXY" docker compose --file "$repo/cache/compose.yaml" up --detach --remove-orphans
+  sudo docker restart ci-verdaccio >/dev/null
+  sudo install -d /etc/exports.d
+  sudo install -m 0644 "$repo/cache/exports" /etc/exports.d/kvm-gha-cache.exports
+  sudo rm -f /etc/exports.d/ci-cache.exports
+  sudo systemctl enable --now nfs-server.service
+  sudo exportfs -ra
+}
+
+ensure_image() {
+  step "Golden image $GOLDEN_VOLUME"
+  "${virsh_cmd[@]}" pool-refresh default >/dev/null
+  if "${virsh_cmd[@]}" vol-info --pool default "$GOLDEN_VOLUME" >/dev/null 2>&1; then
+    echo 'present'
+    return
+  fi
+  sudo GUEST_USER="$GUEST_USER" BUILD_PROXY="$GUEST_PROXY" HOST_PROXY="$HOST_PROXY" \
+    "$repo/image/build-image.sh" "$GOLDEN_VOLUME"
+  "${virsh_cmd[@]}" pool-refresh default >/dev/null
+}
+
+manager_args() {
+  local auth=()
+  if [ -f "$token_file" ]; then
+    auth=(--token-file "$token_file")
+  else
+    auth=(--app-client-id "$GITHUB_APP_CLIENT_ID" --app-installation-id "$GITHUB_APP_INSTALLATION_ID" --app-private-key-file "$pem")
+  fi
+  args=(
+    --url "$GITHUB_URL" --name "$RUNNER_LABELS" --labels "$RUNNER_LABELS" --runner-group default
+    "${auth[@]}" --golden-volume "$GOLDEN_VOLUME" --guest-user "$GUEST_USER" --guest-http-proxy="$GUEST_PROXY"
+    --cpus "$RUNNER_CPUS" --memory-mib "$RUNNER_MEMORY_MIB" --min-runners "$RUNNER_MIN" --max-runners "$RUNNER_MAX"
+  )
+}
+
+ensure_manager() {
+  step "Manager (Go $go_version, built from source)"
+  local tmp
+  if [ "$(/usr/local/bin/go env GOVERSION 2>/dev/null || true)" != "go$go_version" ]; then
+    if [ ! -x "/opt/go/$go_version/bin/go" ]; then
+      tmp="$(mktemp -d)"
+      curl --fail --location --silent --show-error ${HOST_PROXY:+--proxy "$HOST_PROXY"} \
+        "https://go.dev/dl/go$go_version.linux-amd64.tar.gz" --output "$tmp/go.tar.gz"
+      echo "$go_sha256  $tmp/go.tar.gz" | sha256sum --check --strict --quiet
+      sudo install -d -m 0755 "/opt/go/$go_version"
+      sudo tar --extract --gzip --file "$tmp/go.tar.gz" --directory "/opt/go/$go_version" --strip-components=1
+      rm -rf -- "$tmp"
+    fi
+    sudo ln -sfn "/opt/go/$go_version/bin/go" /usr/local/bin/go
+  fi
+  (
+    cd "$repo/manager"
+    env ${HOST_PROXY:+HTTPS_PROXY="$HOST_PROXY"} GOWORK=off CGO_ENABLED=0 \
+      /usr/local/bin/go build -trimpath -ldflags='-s -w' -o "$bin.new" .
+  )
+  install -D -m 0755 "$bin.new" "$bin"
+  rm -f -- "$bin.new"
+  manager_args
+  "$bin" "${args[@]}" --validate-only
+
+  step 'Service'
+  # Hand over from the older kvm-runner-manager: one scale set must have exactly one listener.
+  if systemctl --user cat kvm-runner-manager.service >/dev/null 2>&1; then
+    systemctl --user disable --now kvm-runner-manager.service
+    if [ -d "$HOME/.local/state/kvm-runner-manager" ] && [ ! -e "$HOME/.local/state/kvm-gha-runner" ]; then
+      mv "$HOME/.local/state/kvm-runner-manager" "$HOME/.local/state/kvm-gha-runner"
+    fi
+  fi
+  # Generated from the same arguments as --validate-only; every value is a URL, name or number (no spaces).
+  install -d "$(dirname -- "$unit")"
+  printf '%s\n' \
+    '[Unit]' \
+    "Description=kvm-gha-runner for $GITHUB_URL" \
+    'After=network-online.target' \
+    'Wants=network-online.target' \
+    '' \
+    '[Service]' \
+    'Type=simple' \
+    "ExecStart=$bin ${args[*]}" \
+    'Restart=on-failure' \
+    'RestartSec=5s' \
+    'TimeoutStopSec=70s' \
+    'UMask=0077' \
+    '' \
+    '[Install]' \
+    'WantedBy=default.target' >"$unit"
+  systemctl --user daemon-reload
+  systemctl --user enable kvm-gha-runner.service >/dev/null
+  systemctl --user restart kvm-gha-runner.service
+}
+
+# ---------------------------------------------------------------- commands
+
+cmd_status() {
+  step 'Status'
+  local failed=0
+  check() {
+    if "${@:2}" >/dev/null 2>&1; then printf '  ok    %s\n' "$1"; else printf '  FAIL  %s\n' "$1"; failed=1; fi
+  }
+  check 'Verdaccio :4873' curl --fail --silent --max-time 5 http://192.168.122.1:4873/-/ping
+  check 'Docker Hub mirror :5000' curl --fail --silent --max-time 5 http://192.168.122.1:5000/v2/
+  check 'NFS export /srv/ci-cache' bash -c 'sudo exportfs -v | grep --quiet /srv/ci-cache'
+  check "golden image $GOLDEN_VOLUME" "${virsh_cmd[@]}" vol-info --pool default "$GOLDEN_VOLUME"
+  check 'kvm-gha-runner service' systemctl --user is-active --quiet kvm-gha-runner.service
+  check_proxy
+  printf '\nRunner VMs:\n'
+  "${virsh_cmd[@]}" list --name | grep '^kvm-gha-' | sed 's/^/  /' || echo '  none'
+  printf '\nRecent manager log:\n'
+  journalctl --user -u kvm-gha-runner.service -n 8 --no-pager 2>/dev/null || true
+  return "$failed"
+}
+
+cmd_up() {
+  # First run: ask everything once (proxy first, the token check goes through it).
+  configured || { configure_proxy && configure_github && configure_runners; }
+  ensure_packages
+  ensure_libvirt
+  ensure_caches
+  ensure_image
+  ensure_manager
+  sleep 5
+  cmd_status || die 'something is not running: see the FAIL lines above.'
+  printf '\nDone. Workflows can use "runs-on: %s"; everything comes back by itself after a reboot.\n' "$RUNNER_LABELS"
+}
+
+cmd_rebuild() {
+  need_tty
+  local next
+  next="$(sed -E 's/-v([0-9]+)\.qcow2$/-v\1/' <<<"$GOLDEN_VOLUME")"
+  if [[ "$next" =~ ^(.*-v)([0-9]+)$ ]]; then
+    next="${BASH_REMATCH[1]}$((BASH_REMATCH[2] + 1)).qcow2"
+  else
+    next='kvm-gha-slim-v1.qcow2'
+  fi
+  ask GOLDEN_VOLUME 'New image name' "$next"
+  save_config
+  ensure_image
+  ensure_manager
+  echo "Runners now start from $GOLDEN_VOLUME. Older images stay in /var/lib/libvirt/images until you delete them."
+}
+
+menu() {
+  local choice
+  while true; do
+    printf '\nkvm-gha-runner  %s\n' "${GITHUB_URL:-(not configured)}"
+    printf '  1) Set up / start everything\n'
+    printf '  2) Status\n'
+    printf '  3) GitHub access (token or App)\n'
+    printf '  4) Proxy\n'
+    printf '  5) Runner label and capacity\n'
+    printf '  6) Rebuild the golden image\n'
+    printf '  7) Stop the runners\n'
+    printf '  q) Quit\n'
+    ask choice 'Choose' '1'
+    case "$choice" in
+      1) cmd_up ;;
+      2) cmd_status || true ;;
+      3) configure_github ;;
+      4) configure_proxy ;;
+      5) configure_runners ;;
+      6) cmd_rebuild ;;
+      7) systemctl --user stop kvm-gha-runner.service && echo 'Stopped. Option 1 starts them again.' ;;
+      q | Q) return ;;
+      *) echo "unknown choice: $choice" ;;
+    esac
+    case "$choice" in 3 | 4 | 5) printf 'Run option 1 to apply.\n' ;; esac
+  done
+}
+
+[ "$(id -u)" -ne 0 ] || die 'run as the runner owner, not root; sudo is used where needed.'
+load_config
+case "${1:-}" in
+  '') need_tty && menu ;;
+  up) cmd_up ;;
+  status) cmd_status ;;
+  stop) systemctl --user stop kvm-gha-runner.service ;;
+  github) configure_github ;;
+  proxy) configure_proxy ;;
+  runners) configure_runners ;;
+  rebuild) cmd_rebuild ;;
+  *) die "unknown command: $1 (use: up, status, stop, github, proxy, runners, rebuild)" ;;
+esac

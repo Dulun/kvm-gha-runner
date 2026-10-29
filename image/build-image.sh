@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# Builds the slim runner golden volume unattended:
+# verified Ubuntu 24.04 cloud image → build VM runs provision.sh via cloud-init → powers off →
+# flattened, read-only qcow2 in the libvirt default pool. Run as root: sudo image/build-image.sh <volume-name>
+set -Eeuo pipefail
+
+readonly golden_name="${1:?usage: sudo $0 <golden-volume-name, e.g. kvm-gha-slim-v1.qcow2>}"
+readonly guest_user="${GUEST_USER:-runner}"
+readonly build_proxy="${BUILD_PROXY:-}"     # what the build VM uses to download (e.g. http://192.168.122.1:7897)
+readonly download_proxy="${HOST_PROXY:-}"   # what this host uses to fetch the cloud image
+readonly pool_dir='/var/lib/libvirt/images'
+readonly image_url='https://cloud-images.ubuntu.com/noble/current'
+readonly image_file='noble-server-cloudimg-amd64.img'
+readonly cache_dir='/var/cache/kvm-gha-runner'
+readonly build_name='kvm-gha-image-build'
+readonly build_disk="$pool_dir/$build_name.qcow2"
+readonly build_seed="$pool_dir/$build_name-seed.iso"
+readonly target="$pool_dir/$golden_name"
+readonly timeout_minutes=40
+virsh_cmd=(virsh --connect qemu:///system)
+
+[ "$(id -u)" -eq 0 ] || { echo 'run as root (sudo)' >&2; exit 1; }
+[[ "$golden_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.qcow2$ ]] || { echo "unsafe volume name: $golden_name" >&2; exit 1; }
+[[ "$guest_user" =~ ^[a-z_][a-z0-9_-]*$ ]] || { echo "unsafe guest user: $guest_user" >&2; exit 1; }
+[ ! -e "$target" ] || { echo "refusing to overwrite $target" >&2; exit 1; }
+
+work="$(mktemp -d)"
+cleanup() {
+  local rc=$?
+  "${virsh_cmd[@]}" destroy "$build_name" >/dev/null 2>&1 || true
+  "${virsh_cmd[@]}" undefine "$build_name" --nvram >/dev/null 2>&1 || true
+  rm -rf -- "$work"
+  rm -f -- "$build_disk" "$build_seed" "$target.partial"
+  "${virsh_cmd[@]}" pool-refresh default >/dev/null 2>&1 || true
+  exit "$rc"
+}
+trap cleanup EXIT
+# A build VM left over from an interrupted run would block virt-install.
+"${virsh_cmd[@]}" destroy "$build_name" >/dev/null 2>&1 || true
+"${virsh_cmd[@]}" undefine "$build_name" --nvram >/dev/null 2>&1 || true
+
+echo "==> Download and verify $image_file"
+install -d -m 0755 "$cache_dir"
+fetch() { curl --fail --location --silent --show-error ${download_proxy:+--proxy "$download_proxy"} "$@"; }
+fetch "$image_url/SHA256SUMS" --output "$work/SHA256SUMS"
+fetch "$image_url/SHA256SUMS.gpg" --output "$work/SHA256SUMS.gpg"
+gpgv --keyring /usr/share/keyrings/ubuntu-cloudimage-keyring.gpg "$work/SHA256SUMS.gpg" "$work/SHA256SUMS"
+expected="$(awk -v f="*$image_file" '$2 == f || $2 == substr(f, 2) { print $1 }' "$work/SHA256SUMS")"
+[ -n "$expected" ] || { echo "no checksum for $image_file" >&2; exit 1; }
+if ! echo "$expected  $cache_dir/$image_file" | sha256sum --check --strict --quiet 2>/dev/null; then
+  fetch "$image_url/$image_file" --output "$cache_dir/$image_file.partial"
+  mv -- "$cache_dir/$image_file.partial" "$cache_dir/$image_file"
+  echo "$expected  $cache_dir/$image_file" | sha256sum --check --strict --quiet
+fi
+
+echo '==> Build VM disk and cloud-init seed'
+qemu-img convert -O qcow2 "$cache_dir/$image_file" "$build_disk"
+qemu-img resize "$build_disk" 40G >/dev/null
+chown libvirt-qemu:kvm "$build_disk"
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+printf 'GUEST_USER=%q\nBUILD_PROXY=%q\n' "$guest_user" "$build_proxy" >"$work/build.env"
+{
+  cat <<EOF
+#cloud-config
+users:
+  - name: ${guest_user}
+    uid: '1000'
+    groups: [adm, sudo]
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    lock_passwd: true
+ssh_pwauth: false
+EOF
+  if [ -n "$build_proxy" ]; then
+    printf 'apt:\n  http_proxy: %s\n  https_proxy: %s\n' "$build_proxy" "$build_proxy"
+  fi
+  cat <<EOF
+write_files:
+  - path: /root/kvm-gha-build.env
+    permissions: '0600'
+    encoding: b64
+    content: $(base64 --wrap=0 "$work/build.env")
+  - path: /root/kvm-gha-provision.sh
+    permissions: '0700'
+    encoding: b64
+    content: $(base64 --wrap=0 "$script_dir/provision.sh")
+runcmd:
+  - [ bash, -c, '/root/kvm-gha-provision.sh > /var/log/kvm-gha-provision.log 2>&1; rm -f /root/kvm-gha-provision.sh' ]
+power_state:
+  mode: poweroff
+  condition: test -f /var/lib/kvm-gha-provisioned
+EOF
+} >"$work/user-data"
+printf 'instance-id: %s\nlocal-hostname: %s\n' "$build_name-$(date +%s)" "$build_name" >"$work/meta-data"
+cloud-localds "$build_seed" "$work/user-data" "$work/meta-data"
+chown libvirt-qemu:kvm "$build_seed"
+
+echo "==> Provision in a build VM (up to $timeout_minutes min; follow with: sudo virsh console $build_name)"
+virt-install --connect qemu:///system --name "$build_name" \
+  --memory 4096 --vcpus 2 --cpu host-passthrough --machine q35 --os-variant ubuntu24.04 --boot uefi \
+  --import \
+  --disk "path=$build_disk,device=disk,bus=virtio" \
+  --disk "path=$build_seed,device=cdrom,bus=sata,readonly=on" \
+  --network network=default,model=virtio \
+  --graphics none --console pty,target_type=serial \
+  --noautoconsole >/dev/null
+deadline=$((SECONDS + timeout_minutes * 60))
+until [ "$(LC_ALL=C "${virsh_cmd[@]}" domstate "$build_name" 2>/dev/null)" = 'shut off' ]; do
+  if [ "$SECONDS" -ge "$deadline" ]; then
+    echo "build VM did not power off in $timeout_minutes min: provisioning failed or hung." >&2
+    echo "Inspect before it is destroyed: sudo virsh console $build_name (log: /var/log/kvm-gha-provision.log)" >&2
+    trap - EXIT
+    rm -rf -- "$work"
+    exit 1
+  fi
+  sleep 15
+done
+
+echo "==> Flatten into $target"
+qemu-img convert -O qcow2 -o compat=1.1,lazy_refcounts=on "$build_disk" "$target.partial"
+qemu-img check "$target.partial" >/dev/null
+chown libvirt-qemu:kvm "$target.partial"
+chmod 0440 "$target.partial"
+mv -- "$target.partial" "$target"
+echo "Golden volume ready: $target"
