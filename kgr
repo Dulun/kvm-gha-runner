@@ -2,7 +2,7 @@
 # kvm-gha-runner: one script to set up, run and manage ephemeral KVM GitHub Actions runners on this host.
 #   kgr            interactive menu (first run walks through every question)
 #   kgr up         set up / repair everything and start the runners (safe to rerun any time)
-#   kgr status | log | stop | github | proxy | runners | image | update | rebuild | clean
+#   kgr status | log | stop | github | proxy | runners | image | update | rebuild | clean | prune
 # Run as the user that owns the runners (not root); sudo is used where needed.
 set -Eeuo pipefail
 
@@ -528,6 +528,43 @@ cmd_rebuild() {
   echo "Runners now start from $GOLDEN_VOLUME. Older images stay in /var/lib/libvirt/images until you delete them."
 }
 
+github_api() { # github_api METHOD PATH: repository API call with the saved token (sent through stdin)
+  sed 's/^/Authorization: Bearer /' "$token_file" |
+    curl --fail --silent --show-error --max-time 30 ${HOST_PROXY:+--proxy "$HOST_PROXY"} --header @- \
+      --header 'Accept: application/vnd.github+json' --request "$1" \
+      "https://api.github.com/repos/${GITHUB_URL#https://github.com/}/$2"
+}
+
+cmd_prune_runners() {
+  [ -f "$token_file" ] || die 'removing offline runners needs the fine-grained token (GitHub App access is not supported here).'
+  step 'Offline runners on GitHub'
+  local page=1 body local_vms answer line offline=()
+  # A VM that is still booting is offline too: never remove a runner whose VM exists on this host.
+  local_vms="$("${virsh_cmd[@]}" list --all --name 2>/dev/null || true)"
+  while true; do
+    body="$(github_api GET "actions/runners?per_page=100&page=$page")" || die 'GitHub did not list the runners (token or network).'
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      grep --quiet --fixed-strings --line-regexp "${line#* }" <<<"$local_vms" || offline+=("$line")
+    done < <(jq -r '.runners[] | select(.status == "offline") | "\(.id) \(.name)"' <<<"$body")
+    [ "$(jq '.runners | length' <<<"$body")" -eq 100 ] || break
+    page=$((page + 1))
+  done
+  if [ "${#offline[@]}" -eq 0 ]; then
+    echo 'None.'
+    return 0
+  fi
+  printf '  %s\n' "${offline[@]#* }"
+  if [ -t 0 ]; then
+    ask answer "Remove these ${#offline[@]} offline runners from GitHub? (Y/n)" 'Y'
+    [[ "$answer" =~ ^[Nn] ]] && { echo 'Nothing removed.'; return 0; }
+  fi
+  for line in "${offline[@]}"; do
+    github_api DELETE "actions/runners/${line%% *}" >/dev/null || warn "could not remove ${line#* }"
+  done
+  echo "Removed ${#offline[@]} offline runners."
+}
+
 cmd_log() {
   echo 'Following the runner log. Press Ctrl+C to go back.'
   trap 'true' INT
@@ -594,6 +631,7 @@ menu() {
     printf '  8) Update kvm-gha-runner and apply\n'
     printf '  9) Rebuild the golden image\n'
     printf '  c) Disk usage and cleanup\n'
+    printf '  o) Remove offline runners from GitHub\n'
     printf '  s) Stop the runners\n'
     printf '  q) Quit\n'
     ask choice 'Choose' '1'
@@ -608,6 +646,7 @@ menu() {
       8) cmd_update ;;
       9) cmd_rebuild ;;
       c | C) cmd_clean ;;
+      o | O) cmd_prune_runners ;;
       s | S) systemctl --user stop kvm-gha-runner.service && echo 'Stopped. Option 1 starts them again.' ;;
       q | Q) return ;;
       *) echo "unknown choice: $choice" ;;
@@ -637,6 +676,7 @@ case "${1:-}" in
   log) cmd_log ;;
   update) cmd_update ;;
   clean) cmd_clean ;;
+  prune) cmd_prune_runners ;;
   git-fetch) cmd_git_fetch ;;
-  *) die "unknown command: $1 (use: up, status, log, stop, github, proxy, runners, image, update, rebuild, clean)" ;;
+  *) die "unknown command: $1 (use: up, status, log, stop, github, proxy, runners, image, update, rebuild, clean, prune)" ;;
 esac

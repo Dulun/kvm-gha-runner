@@ -150,6 +150,7 @@ also a command:
 | `kgr update` | Pull the latest kvm-gha-runner and apply it |
 | `kgr rebuild` | Build a new golden image (next version number) and switch to it |
 | `kgr clean` | Show disk use; delete old images and, if you confirm, empty the caches |
+| `kgr prune` | Remove offline runners from GitHub (left by old setups or crashed VMs); runners whose VM still exists here are kept |
 | `kgr stop` | Stop the runners |
 
 From the menu, changes are applied when you confirm. With the commands, run `kgr up` afterwards.
