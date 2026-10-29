@@ -44,7 +44,7 @@ need_tty() { [ -t 0 ] || die "this needs answers: run kgr in a terminal."; }
 GITHUB_URL='' GITHUB_APP_CLIENT_ID='' GITHUB_APP_INSTALLATION_ID=''
 RUNNER_LABELS='kvm-runner-set' RUNNER_MIN='2' RUNNER_MAX='8' RUNNER_CPUS='2' RUNNER_MEMORY_GIB='4' RUNNER_DISK_GIB='20' RUNNER_KEEP_FAILED='2'
 GOLDEN_VOLUME='kvm-gha-slim-v1.qcow2' GUEST_USER='runner'
-IMAGE_TOOLS='node python go supabase skopeo psql' IMAGE_DOCKER_IMAGES=''
+IMAGE_TOOLS='node python go supabase skopeo psql' IMAGE_DOCKER_IMAGES='' BASE_IMAGE=''
 # Tools that can be baked into the golden image: ID, description. Versions live in image/provision.sh.
 readonly image_tool_catalog=(
   node 'Node.js LTS with pnpm (npm and pnpm use the Verdaccio cache)'
@@ -92,6 +92,7 @@ save_config() {
       "GUEST_USER=$GUEST_USER" \
       "IMAGE_TOOLS='$IMAGE_TOOLS'" \
       "IMAGE_DOCKER_IMAGES='$IMAGE_DOCKER_IMAGES'" \
+      "BASE_IMAGE='$BASE_IMAGE'" \
       "HOST_PROXY=$HOST_PROXY" \
       "GUEST_PROXY=$GUEST_PROXY" >"$config"
   )
@@ -172,7 +173,7 @@ configure_runners() {
 
 configure_image() {
   need_tty
-  local items=() i id picked images ref
+  local items=() i id picked images ref base
   if ! command -v whiptail >/dev/null 2>&1; then
     sudo env DEBIAN_FRONTEND=noninteractive ${HOST_PROXY:+http_proxy="$HOST_PROXY" https_proxy="$HOST_PROXY"} apt-get install --yes whiptail
   fi
@@ -186,16 +187,24 @@ configure_image() {
   images="$(whiptail --title 'Golden image: Docker images' --inputbox \
     'Other Docker images to bake in, separated by spaces (e.g. postgres:17 ghcr.io/owner/app:1.2). Leave empty for none.' \
     10 78 "$IMAGE_DOCKER_IMAGES" 3>&1 1>&2 2>&3)" || { echo 'Cancelled: nothing changed.'; return 0; }
+  base="$(whiptail --title 'Golden image: base' --inputbox \
+    'Your own Ubuntu 26.04 cloud image file to build from (.img or .qcow2). Leave empty to use the official image: downloaded once, then reused.' \
+    10 78 "$BASE_IMAGE" 3>&1 1>&2 2>&3)" || { echo 'Cancelled: nothing changed.'; return 0; }
+  base="$(xargs <<<"$base")"
+  if [ -n "$base" ]; then
+    [[ "$base" =~ ^/[A-Za-z0-9._/+-]+$ ]] || die "use an absolute path without spaces or quotes: $base"
+    sudo test -r "$base" || die "cannot read $base"
+  fi
   picked="$(tr '\n' ' ' <<<"$picked" | sed 's/ *$//')"
   images="$(xargs <<<"$images")"
   for ref in $images; do
     [[ "$ref" =~ ^[A-Za-z0-9][A-Za-z0-9._/:@-]*$ ]] || die "not a Docker image reference: $ref"
   done
-  if [ "$picked" = "$IMAGE_TOOLS" ] && [ "$images" = "$IMAGE_DOCKER_IMAGES" ]; then
+  if [ "$picked" = "$IMAGE_TOOLS" ] && [ "$images" = "$IMAGE_DOCKER_IMAGES" ] && [ "$base" = "$BASE_IMAGE" ]; then
     echo 'Image contents unchanged.'
     return 0
   fi
-  IMAGE_TOOLS="$picked" IMAGE_DOCKER_IMAGES="$images"
+  IMAGE_TOOLS="$picked" IMAGE_DOCKER_IMAGES="$images" BASE_IMAGE="$base"
   # A new name makes the next apply build the image; the old one stays until Disk usage and cleanup.
   if "${virsh_cmd[@]}" vol-info --pool default "$GOLDEN_VOLUME" >/dev/null 2>&1; then
     GOLDEN_VOLUME="$(next_image_name)"
@@ -353,7 +362,7 @@ ensure_image() {
     return
   fi
   sudo GUEST_USER="$GUEST_USER" BUILD_PROXY="$GUEST_PROXY" HOST_PROXY="$HOST_PROXY" \
-    IMAGE_TOOLS="$IMAGE_TOOLS" IMAGE_DOCKER_IMAGES="$IMAGE_DOCKER_IMAGES" \
+    IMAGE_TOOLS="$IMAGE_TOOLS" IMAGE_DOCKER_IMAGES="$IMAGE_DOCKER_IMAGES" BASE_IMAGE="$BASE_IMAGE" \
     "$repo/image/build-image.sh" "$GOLDEN_VOLUME"
   "${virsh_cmd[@]}" pool-refresh default >/dev/null
 }

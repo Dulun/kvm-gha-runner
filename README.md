@@ -61,6 +61,7 @@ Steps for the agent. Run everything as the human's normal user, not root.
    GUEST_USER=runner
    IMAGE_TOOLS='node python go supabase skopeo psql'
    IMAGE_DOCKER_IMAGES=''
+   BASE_IMAGE=''
    HOST_PROXY=http://127.0.0.1:7897
    GUEST_PROXY=http://192.168.122.1:7897
    ```
@@ -106,7 +107,10 @@ Don't edit files in the repository, run `kgr rebuild` or delete images or caches
 
   Bake in anything your workflows would otherwise `apt install`: jobs then skip `apt update` entirely.
 
-  You can also list any other Docker images to bake in. Baked tools are downloaded once, when the image is
+  You can also list any other Docker images to bake in, and point it at your own Ubuntu 26.04 cloud image
+  file to build from. Otherwise it uses the official image: downloaded once into `/var/cache/kvm-gha-runner`,
+  then reused for every rebuild after an offline signature and checksum check. An existing golden image is
+  never rebuilt unless you change its contents or choose Rebuild. Baked tools are downloaded once, when the image is
   built; jobs find them already installed. Every download is pinned to a version and checksum in
   `image/provision.sh`. Tools you don't bake can still come from `setup-*` actions, which download each
   version once into the shared tool cache.

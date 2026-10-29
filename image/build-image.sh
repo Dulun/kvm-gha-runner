@@ -8,6 +8,7 @@ readonly golden_name="${1:?usage: sudo $0 <golden-volume-name, e.g. kvm-gha-slim
 readonly guest_user="${GUEST_USER:-runner}"
 readonly build_proxy="${BUILD_PROXY:-}"     # what the build VM uses to download (e.g. http://192.168.122.1:7897)
 readonly download_proxy="${HOST_PROXY:-}"   # what this host uses to fetch the cloud image
+readonly base_image="${BASE_IMAGE:-}"       # your own Ubuntu 26.04 cloud image file; empty = the official one
 readonly pool_dir='/var/lib/libvirt/images'
 readonly image_url='https://cloud-images.ubuntu.com/resolute/current'
 readonly image_file='resolute-server-cloudimg-amd64.img'
@@ -39,22 +40,38 @@ trap cleanup EXIT
 "${virsh_cmd[@]}" destroy "$build_name" >/dev/null 2>&1 || true
 "${virsh_cmd[@]}" undefine "$build_name" --nvram >/dev/null 2>&1 || true
 
-echo "==> Download and verify $image_file"
-install -d -m 0755 "$cache_dir"
+# Base image, first match wins: your own file, the official image downloaded earlier, a fresh download.
+# The official one is kept with its signed checksum list and re-verified offline on every build.
 fetch() { curl --fail --location --silent --show-error ${download_proxy:+--proxy "$download_proxy"} "$@"; }
-fetch "$image_url/SHA256SUMS" --output "$work/SHA256SUMS"
-fetch "$image_url/SHA256SUMS.gpg" --output "$work/SHA256SUMS.gpg"
-gpgv --keyring /usr/share/keyrings/ubuntu-cloudimage-keyring.gpg "$work/SHA256SUMS.gpg" "$work/SHA256SUMS"
-expected="$(awk -v f="*$image_file" '$2 == f || $2 == substr(f, 2) { print $1 }' "$work/SHA256SUMS")"
-[ -n "$expected" ] || { echo "no checksum for $image_file" >&2; exit 1; }
-if ! echo "$expected  $cache_dir/$image_file" | sha256sum --check --strict --quiet 2>/dev/null; then
-  fetch "$image_url/$image_file" --output "$cache_dir/$image_file.partial"
-  mv -- "$cache_dir/$image_file.partial" "$cache_dir/$image_file"
-  echo "$expected  $cache_dir/$image_file" | sha256sum --check --strict --quiet
+verify_cached() {
+  [ -f "$cache_dir/$image_file" ] && [ -f "$cache_dir/SHA256SUMS" ] && [ -f "$cache_dir/SHA256SUMS.gpg" ] || return 1
+  gpgv --keyring /usr/share/keyrings/ubuntu-cloudimage-keyring.gpg \
+    "$cache_dir/SHA256SUMS.gpg" "$cache_dir/SHA256SUMS" >/dev/null 2>&1 || return 1
+  local expected
+  expected="$(awk -v f="*$image_file" '$2 == f || $2 == substr(f, 2) { print $1 }' "$cache_dir/SHA256SUMS")"
+  [ -n "$expected" ] && echo "$expected  $cache_dir/$image_file" | sha256sum --check --strict --quiet 2>/dev/null
+}
+if [ -n "$base_image" ]; then
+  [ -f "$base_image" ] && [ -r "$base_image" ] || { echo "base image not readable: $base_image" >&2; exit 1; }
+  echo "==> Use your base image $base_image"
+  source_image="$base_image"
+else
+  install -d -m 0755 "$cache_dir"
+  if verify_cached; then
+    echo "==> Reuse the downloaded $image_file (signature and checksum verified)"
+  else
+    echo "==> Download and verify $image_file"
+    fetch "$image_url/SHA256SUMS" --output "$cache_dir/SHA256SUMS"
+    fetch "$image_url/SHA256SUMS.gpg" --output "$cache_dir/SHA256SUMS.gpg"
+    fetch "$image_url/$image_file" --output "$cache_dir/$image_file.partial"
+    mv -- "$cache_dir/$image_file.partial" "$cache_dir/$image_file"
+    verify_cached || { rm -f -- "$cache_dir/$image_file"; echo "downloaded $image_file failed verification" >&2; exit 1; }
+  fi
+  source_image="$cache_dir/$image_file"
 fi
 
 echo '==> Build VM disk and cloud-init seed'
-qemu-img convert -O qcow2 "$cache_dir/$image_file" "$build_disk"
+qemu-img convert -O qcow2 "$source_image" "$build_disk"
 # Small, so the per-runner disk setting decides the VM size; baked Docker images need more room.
 disk_gib=10
 if [[ " ${IMAGE_TOOLS:-} " == *" supabase-stack "* ]] || [ -n "${IMAGE_DOCKER_IMAGES:-}" ]; then disk_gib=30; fi
