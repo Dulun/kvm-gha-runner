@@ -26,9 +26,9 @@ die() {
   exit 1
 }
 ask() { # ask VAR "question" [default]
-  local answer
-  read -r -p "$2${3:+ [$3]}: " answer
-  printf -v "$1" '%s' "${answer:-${3:-}}"
+  local _kgr_reply # not "answer": a local with the caller's name would swallow printf -v
+  read -r -p "$2${3:+ [$3]}: " _kgr_reply
+  printf -v "$1" '%s' "${_kgr_reply:-${3:-}}"
 }
 ask_number() { # ask_number VAR "question" default min
   while true; do
@@ -593,7 +593,7 @@ cmd_clean() {
       for vol in "${old[@]}"; do "${virsh_cmd[@]}" vol-delete --pool default "$vol"; done
     fi
   fi
-  ask answer 'Empty all caches (npm, pnpm, tool cache, Go modules, pip, uv, apt, git, Verdaccio, Docker Hub mirror)? They refill on later jobs; runners stop meanwhile (y/N)' 'N'
+  ask answer 'Empty all caches (npm, pnpm, tool cache, Go modules, pip, uv, apt, git, Verdaccio, Docker Hub and mcr mirrors)? They refill on later jobs; runners stop meanwhile (y/N)' 'N'
   [[ "$answer" =~ ^[Yy] ]] || return 0
   systemctl --user stop kvm-gha-runner.service || true
   sudo env HOST_PROXY="$HOST_PROXY" docker compose --file "$repo/cache/compose.yaml" down
