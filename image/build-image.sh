@@ -18,6 +18,8 @@ readonly build_disk="$pool_dir/$build_name.qcow2"
 readonly build_seed="$pool_dir/$build_name-seed.iso"
 readonly target="$pool_dir/$golden_name"
 readonly timeout_minutes=40
+# The build VM's serial console (written by libvirt); provision.sh reports its steps there.
+readonly console_log="/var/log/libvirt/qemu/$build_name-console.log"
 virsh_cmd=(virsh --connect qemu:///system)
 
 [ "$(id -u)" -eq 0 ] || { echo 'run as root (sudo)' >&2; exit 1; }
@@ -107,7 +109,7 @@ write_files:
     encoding: b64
     content: $(base64 --wrap=0 "$script_dir/provision.sh")
 runcmd:
-  - [ bash, -c, '/root/kvm-gha-provision.sh > /var/log/kvm-gha-provision.log 2>&1; rm -f /root/kvm-gha-provision.sh' ]
+  - [ bash, -c, '/root/kvm-gha-provision.sh 2>&1 | tee /var/log/kvm-gha-provision.log >/dev/ttyS0; rm -f /root/kvm-gha-provision.sh' ]
 power_state:
   mode: poweroff
   condition: test -f /var/lib/kvm-gha-provisioned
@@ -117,26 +119,50 @@ printf 'instance-id: %s\nlocal-hostname: %s\n' "$build_name-$(date +%s)" "$build
 cloud-localds "$build_seed" "$work/user-data" "$work/meta-data"
 chown libvirt-qemu:kvm "$build_seed"
 
-echo "==> Provision in a build VM (up to $timeout_minutes min; follow with: sudo virsh console $build_name)"
+echo "==> Provision in a build VM (up to $timeout_minutes min; full output: sudo tail -f $console_log)"
 virt-install --connect qemu:///system --name "$build_name" \
   --memory 4096 --vcpus 2 --cpu host-passthrough --machine q35 --os-variant ubuntu26.04 --boot uefi \
   --import \
   --disk "path=$build_disk,device=disk,bus=virtio" \
   --disk "path=$build_seed,device=cdrom,bus=sata,readonly=on" \
   --network network=default,model=virtio \
-  --graphics none --console pty,target_type=serial \
+  --graphics none --serial "pty,log.file=$console_log,log.append=off" \
   --noautoconsole >/dev/null
+started=$SECONDS
 deadline=$((SECONDS + timeout_minutes * 60))
+shown=''
+keep_vm_and_exit() {
+  echo '--- last lines of the build VM console ---' >&2
+  tail -n 25 "$console_log" >&2 2>/dev/null || true
+  echo "Inspect before it is destroyed: sudo virsh console $build_name (log: /var/log/kvm-gha-provision.log)" >&2
+  trap - EXIT
+  rm -rf -- "$work"
+  exit 1
+}
 until [ "$(LC_ALL=C "${virsh_cmd[@]}" domstate "$build_name" 2>/dev/null)" = 'shut off' ]; do
-  if [ "$SECONDS" -ge "$deadline" ]; then
-    echo "build VM did not power off in $timeout_minutes min: provisioning failed or hung." >&2
-    echo "Inspect before it is destroyed: sudo virsh console $build_name (log: /var/log/kvm-gha-provision.log)" >&2
-    trap - EXIT
-    rm -rf -- "$work"
-    exit 1
+  failed="$(grep -a -o 'KGR-FAILED [^[:cntrl:]]*' "$console_log" 2>/dev/null | tail -n 1 || true)"
+  if [ -n "$failed" ]; then
+    printf '\nprovisioning failed: %s\n' "${failed#KGR-FAILED }" >&2
+    keep_vm_and_exit
   fi
-  sleep 15
+  if [ "$SECONDS" -ge "$deadline" ]; then
+    printf '\nbuild VM did not power off in %s min: provisioning hung.\n' "$timeout_minutes" >&2
+    keep_vm_and_exit
+  fi
+  report="$(grep -a -o 'KGR-PROGRESS [0-9]* [^[:cntrl:]]*' "$console_log" 2>/dev/null | tail -n 1 || true)"
+  percent=0 label='Booting the build VM'
+  [ -z "$report" ] || read -r _ percent label <<<"$report"
+  elapsed=$((SECONDS - started))
+  if [ -t 1 ]; then
+    bar="$(printf '%*s' $((percent * 30 / 100)) '' | tr ' ' '#')"
+    printf '\r  [%-30s] %3d%%  %-42.42s %2dm%02ds' "$bar" "$percent" "$label" $((elapsed / 60)) $((elapsed % 60))
+  elif [ "$label" != "$shown" ]; then
+    printf '  %3d%%  %s\n' "$percent" "$label"
+  fi
+  shown="$label"
+  sleep 5
 done
+[ ! -t 1 ] || echo
 
 echo "==> Flatten into $target"
 qemu-img convert -O qcow2 -o compat=1.1,lazy_refcounts=on "$build_disk" "$target.partial"

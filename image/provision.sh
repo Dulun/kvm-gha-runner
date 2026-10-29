@@ -37,6 +37,9 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 tmp="$(mktemp -d)"
 trap 'rm -rf -- "$tmp"' EXIT
+# build-image.sh reads these lines from the serial console log (stdout goes there too) for its progress bar.
+progress() { printf '\nKGR-PROGRESS %s %s\n' "$1" "$2" >/dev/ttyS0 2>/dev/null || true; }
+trap 'printf "\nKGR-FAILED line %s (see /var/log/kvm-gha-provision.log)\n" "$LINENO" >/dev/ttyS0 2>/dev/null || true' ERR
 has_tool() { [[ " ${IMAGE_TOOLS:-} " == *" $1 "* ]]; }
 dl_cache='' # set once the host's NFS cache is mounted: downloads stay there for the next build
 fetch() { # fetch URL FILE SHA256 (from the download cache when it has a verified copy)
@@ -55,6 +58,7 @@ gh_release() { echo "https://github.com/$1/releases/download/$2"; }
 systemctl disable --now apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service >/dev/null 2>&1 || true
 systemctl mask apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service >/dev/null
 
+progress 5 'apt packages'
 apt_extra=()
 has_tool python && apt_extra+=(python3 python3-pip python3-venv)
 has_tool shellcheck && apt_extra+=(shellcheck)
@@ -95,6 +99,7 @@ systemctl enable docker.service qemu-guest-agent.service
 echo "${cache_host}:/srv/ci-cache ${cache_root} nfs4 rw,nofail,_netdev,soft,timeo=50,retrans=2 0 0" >>/etc/fstab
 install -d -o "$GUEST_USER" -g "$GUEST_USER" -m 0775 "$cache_root"/{pnpm,pnpm-cache,npm,toolcache,go-mod,pip,uv}
 
+progress 35 'Node and pnpm'
 if has_tool node; then
   fetch "https://nodejs.org/dist/v${node_version}/node-v${node_version}-linux-x64.tar.xz" "$tmp/node.tar.xz" "$node_sha256"
   tar --extract --xz --file "$tmp/node.tar.xz" --directory /usr/local --strip-components=1
@@ -108,6 +113,7 @@ printf 'storeDir: %s/pnpm\ncacheDir: %s/pnpm-cache\n' "$cache_root" "$cache_root
 printf 'registry=%s\n' "$registry" >"$home/.npmrc"
 chown "$GUEST_USER:$GUEST_USER" "$home/.config/pnpm/config.yaml" "$home/.npmrc"
 
+progress 42 'Actions runner'
 fetch "$(gh_release actions/runner "v$runner_version")/actions-runner-linux-x64-${runner_version}.tar.gz" \
   "$tmp/runner.tar.gz" "$runner_sha256"
 install -d -o "$GUEST_USER" -g "$GUEST_USER" /opt/actions-runner
@@ -132,6 +138,7 @@ HOOK
 chmod 0755 /opt/actions-runner/kgr-job-started.sh
 chown -R "$GUEST_USER:$GUEST_USER" /opt/actions-runner
 
+progress 60 'Go, uv, Supabase, Deno, actionlint, aliyun'
 if has_tool go; then
   fetch "https://go.dev/dl/go${go_version}.linux-amd64.tar.gz" "$tmp/go.tar.gz" "$go_sha256"
   tar --extract --gzip --file "$tmp/go.tar.gz" --directory /usr/local
@@ -162,6 +169,7 @@ if has_tool aliyun; then
   tar --extract --gzip --file "$tmp/aliyun.tgz" --directory /usr/local/bin
 fi
 
+progress 75 'Docker images'
 # Baked Docker images: Docker Hub through the :5000 mirror, other registries through the build proxy.
 if has_tool supabase-stack || [ -n "${IMAGE_DOCKER_IMAGES:-}" ]; then
   if [ -n "$BUILD_PROXY" ]; then
@@ -187,6 +195,7 @@ if has_tool supabase-stack || [ -n "${IMAGE_DOCKER_IMAGES:-}" ]; then
   docker image ls --format '{{.Repository}}:{{.Tag}}'
 fi
 
+progress 95 'Check and clean up'
 if has_tool node; then node --version && pnpm --version; fi
 docker --version
 docker compose version
@@ -213,3 +222,4 @@ cloud-init clean --logs --machine-id --seed
 # build-image.sh only accepts the disk when this marker exists (cloud-init powers off only then).
 touch /var/lib/kvm-gha-provisioned
 fstrim --all >/dev/null 2>&1 || true
+progress 100 'Done, powering off'
