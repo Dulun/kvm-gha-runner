@@ -25,6 +25,9 @@ virsh_cmd=(virsh --connect qemu:///system)
 [ "$(id -u)" -eq 0 ] || { echo 'run as root (sudo)' >&2; exit 1; }
 [[ "$golden_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.qcow2$ ]] || { echo "unsafe volume name: $golden_name" >&2; exit 1; }
 [[ "$guest_user" =~ ^[a-z_][a-z0-9_-]*$ ]] || { echo "unsafe guest user: $guest_user" >&2; exit 1; }
+# One build at a time: they share the build VM name and disk, and each start destroys a leftover build VM.
+exec 9>/run/lock/kvm-gha-image-build.lock
+flock --nonblock 9 || { echo 'another image build is running; wait for it to finish' >&2; exit 1; }
 [ ! -e "$target" ] || { echo "refusing to overwrite $target" >&2; exit 1; }
 
 work="$(mktemp -d)"
@@ -139,7 +142,7 @@ keep_vm_and_exit() {
   rm -rf -- "$work"
   exit 1
 }
-until [ "$(LC_ALL=C "${virsh_cmd[@]}" domstate "$build_name" 2>/dev/null)" = 'shut off' ]; do
+while state="$(LC_ALL=C "${virsh_cmd[@]}" domstate "$build_name" 2>/dev/null)" && [ "$state" != 'shut off' ]; do
   failed="$(grep -a -o 'KGR-FAILED [^[:cntrl:]]*' "$console_log" 2>/dev/null | tail -n 1 || true)"
   if [ -n "$failed" ]; then
     printf '\nprovisioning failed: %s\n' "${failed#KGR-FAILED }" >&2
@@ -167,6 +170,7 @@ until [ "$(LC_ALL=C "${virsh_cmd[@]}" domstate "$build_name" 2>/dev/null)" = 'sh
   sleep 5
 done
 [ ! -t 1 ] || echo
+[ "${state:-}" = 'shut off' ] || { echo "the build VM $build_name disappeared (removed outside this build?)" >&2; exit 1; }
 
 echo "==> Flatten into $target"
 qemu-img convert -O qcow2 -o compat=1.1,lazy_refcounts=on "$build_disk" "$target.partial"
