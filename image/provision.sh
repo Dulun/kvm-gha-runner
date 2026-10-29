@@ -65,7 +65,7 @@ cat >/etc/docker/daemon.json <<EOF
   "features": { "buildkit": true },
   "log-driver": "local",
   "registry-mirrors": ["http://${cache_host}:5000"],
-  "insecure-registries": ["${cache_host}:5000"]
+  "insecure-registries": ["${cache_host}:5000", "${cache_host}:5001"]
 }
 EOF
 systemctl enable docker.service qemu-guest-agent.service
@@ -101,6 +101,7 @@ printf '%s\n' \
   "GOMODCACHE=$cache_root/go-mod" "PIP_CACHE_DIR=$cache_root/pip" \
   "UV_CACHE_DIR=$cache_root/uv" 'UV_LINK_MODE=copy' \
   "GIT_ALTERNATE_OBJECT_DIRECTORIES=$cache_root/git/mirror.git/objects" \
+  "KGR_MCR_MIRROR=${cache_host}:5001" \
   'ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/actions-runner/kgr-job-started.sh' >/opt/actions-runner/.env
 # Each job start asks the host to fetch new commits into the git cache (the host owns it; VMs only read).
 cat >/opt/actions-runner/kgr-job-started.sh <<'HOOK'

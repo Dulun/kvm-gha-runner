@@ -299,9 +299,9 @@ ensure_libvirt() {
 }
 
 ensure_caches() {
-  step 'Caches: Verdaccio :4873, Docker Hub mirror :5000, apt :3142, git, NFS /srv/ci-cache'
+  step 'Caches: Verdaccio :4873, Docker Hub :5000, mcr :5001, apt :3142, git, NFS /srv/ci-cache'
   local name project
-  sudo install -d "$cache_root"/{pnpm,pnpm-cache,npm,toolcache,go-mod,pip,uv,verdaccio,registry-hub}
+  sudo install -d "$cache_root"/{pnpm,pnpm-cache,npm,toolcache,go-mod,pip,uv,verdaccio,registry-hub,registry-mcr}
   # VMs write as uid 1000 (all_squash): repair anything an older setup or a root process left behind.
   sudo find "$cache_root"/{pnpm,pnpm-cache,npm,toolcache,go-mod,pip,uv} ! -uid 1000 -exec chown 1000:1000 {} +
   sudo install -d "$cache_root/verdaccio/storage"
@@ -313,7 +313,7 @@ ensure_caches() {
     grep --invert-match --extended-regexp '^https?_proxy: ' "$repo/cache/verdaccio/config.yaml"
   fi | sudo tee "$cache_root/verdaccio/config.yaml" >/dev/null
   # Same-named containers from an older setup would block compose; their data lives in bind mounts.
-  for name in ci-verdaccio ci-registry-hub ci-registry-cache; do
+  for name in ci-verdaccio ci-registry-hub ci-registry-mcr ci-registry-cache; do
     sudo docker inspect "$name" >/dev/null 2>&1 || continue
     project="$(sudo docker inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' "$name")"
     [ "$project" = 'kvm-gha-cache' ] || sudo docker rm --force "$name" >/dev/null
@@ -476,6 +476,7 @@ cmd_status() {
   }
   check 'Verdaccio :4873' curl --fail --silent --max-time 5 http://192.168.122.1:4873/-/ping
   check 'Docker Hub mirror :5000' curl --fail --silent --max-time 5 http://192.168.122.1:5000/v2/
+  check 'mcr.microsoft.com mirror :5001' curl --fail --silent --max-time 5 http://192.168.122.1:5001/v2/
   check 'apt cache :3142' curl --fail --silent --max-time 5 --output /dev/null http://192.168.122.1:3142/acng-report.html
   check 'git cache (fetched when jobs start)' bash -c "git -C '$cache_root/git/mirror.git' for-each-ref --count=1 | grep --quiet ."
   check 'NFS export /srv/ci-cache' bash -c 'sudo exportfs -v | grep --quiet /srv/ci-cache'
@@ -596,7 +597,7 @@ cmd_clean() {
   [[ "$answer" =~ ^[Yy] ]] || return 0
   systemctl --user stop kvm-gha-runner.service || true
   sudo env HOST_PROXY="$HOST_PROXY" docker compose --file "$repo/cache/compose.yaml" down
-  sudo find "$cache_root"/{pnpm,pnpm-cache,npm,toolcache,go-mod,pip,uv,apt,git,registry-hub} "$cache_root/verdaccio/storage" -mindepth 1 -delete
+  sudo find "$cache_root"/{pnpm,pnpm-cache,npm,toolcache,go-mod,pip,uv,apt,git,registry-hub,registry-mcr} "$cache_root/verdaccio/storage" -mindepth 1 -delete
   cmd_up
 }
 

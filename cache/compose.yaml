@@ -28,3 +28,20 @@ services:
       NO_PROXY: 127.0.0.1,192.168.122.0/24
     volumes:
       - /srv/ci-cache/registry-hub:/var/lib/registry
+
+  # mcr.microsoft.com pull-through (.NET images): workflows pull 192.168.122.1:5001/<repo>@<digest>;
+  # the digest pins the content, so it is the same image as mcr.microsoft.com/<repo>@<digest>.
+  registry-mcr:
+    image: registry:2.8.3@sha256:2a6992855d017a595610e58ec68ebc68c25ac6184cc91222ff08ad67e547b215
+    container_name: ci-registry-mcr
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      REGISTRY_HTTP_ADDR: 192.168.122.1:5001
+      REGISTRY_PROXY_REMOTEURL: https://mcr.microsoft.com
+      REGISTRY_STORAGE_DELETE_ENABLED: 'true'
+      HTTP_PROXY: ${HOST_PROXY:-}
+      HTTPS_PROXY: ${HOST_PROXY:-}
+      NO_PROXY: 127.0.0.1,192.168.122.0/24
+    volumes:
+      - /srv/ci-cache/registry-mcr:/var/lib/registry

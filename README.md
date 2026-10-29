@@ -120,11 +120,12 @@ Don't edit files in the repository, run `kgr rebuild` or delete images or caches
   | --- | --- | --- |
   | Verdaccio npm registry | `192.168.122.1:4873` | npm and pnpm in VMs |
   | Docker Hub pull-through | `192.168.122.1:5000` | dockerd in VMs (`registry-mirrors`) |
+  | mcr.microsoft.com pull-through | `192.168.122.1:5001` | workflows that read `KGR_MCR_MIRROR` and pull `$KGR_MCR_MIRROR/<repo>@<digest>` (dockerd only mirrors Docker Hub by itself) |
   | apt-cacher-ng | `192.168.122.1:3142` | `apt-get update` and `apt-get install` in jobs |
   | git mirror of your repository (full history) | `/mnt/ci-cache/git/mirror.git` | each job start asks the host to fetch what is new (no timer); every git command in VMs borrows its objects (`GIT_ALTERNATE_OBJECT_DIRECTORIES`), so `actions/checkout` downloads only commits the mirror does not have yet |
   | NFS `/srv/ci-cache` | mounted at `/mnt/ci-cache` | pnpm store, npm cache, Actions tool cache (`RUNNER_TOOL_CACHE`), Go modules (`GOMODCACHE`), pip and uv caches |
 
-  Not cached: images from registries other than Docker Hub (bake them in instead), Deno's `jsr:` imports,
+  Not cached: images from registries other than Docker Hub and mcr.microsoft.com (bake them in instead), Deno's `jsr:` imports,
   apt repositories served over HTTPS and `actions/cache`. Those go through the proxy each time.
 - **Proxy everywhere.**
   - `HOST_PROXY` covers apt, downloads, `go build`, the host's dockerd and cache misses.
