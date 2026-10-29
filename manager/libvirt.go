@@ -159,7 +159,7 @@ func (l *LibvirtBackend) Start(ctx context.Context, record RunnerRecord, encoded
 		"--vcpus", strconv.Itoa(l.cfg.CPUs),
 		"--cpu", "host-passthrough",
 		"--machine", "q35",
-		"--os-variant", "ubuntu24.04",
+		"--os-variant", "ubuntu26.04",
 		"--import",
 		"--disk", fmt.Sprintf("vol=%s/%s,device=disk,bus=virtio,cache=none,discard=unmap", l.cfg.StoragePool, record.DiskVolume),
 		"--disk", fmt.Sprintf("vol=%s/%s,device=cdrom,bus=sata,readonly=on", l.cfg.StoragePool, record.SeedVolume),

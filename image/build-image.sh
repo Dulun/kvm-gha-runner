@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds the slim runner golden volume unattended:
-# verified Ubuntu 24.04 cloud image → build VM runs provision.sh via cloud-init → powers off →
+# verified Ubuntu 26.04 LTS cloud image → build VM runs provision.sh via cloud-init → powers off →
 # flattened, read-only qcow2 in the libvirt default pool. Run as root: sudo image/build-image.sh <volume-name>
 set -Eeuo pipefail
 
@@ -9,8 +9,8 @@ readonly guest_user="${GUEST_USER:-runner}"
 readonly build_proxy="${BUILD_PROXY:-}"     # what the build VM uses to download (e.g. http://192.168.122.1:7897)
 readonly download_proxy="${HOST_PROXY:-}"   # what this host uses to fetch the cloud image
 readonly pool_dir='/var/lib/libvirt/images'
-readonly image_url='https://cloud-images.ubuntu.com/noble/current'
-readonly image_file='noble-server-cloudimg-amd64.img'
+readonly image_url='https://cloud-images.ubuntu.com/resolute/current'
+readonly image_file='resolute-server-cloudimg-amd64.img'
 readonly cache_dir='/var/cache/kvm-gha-runner'
 readonly build_name='kvm-gha-image-build'
 readonly build_disk="$pool_dir/$build_name.qcow2"
@@ -98,7 +98,7 @@ chown libvirt-qemu:kvm "$build_seed"
 
 echo "==> Provision in a build VM (up to $timeout_minutes min; follow with: sudo virsh console $build_name)"
 virt-install --connect qemu:///system --name "$build_name" \
-  --memory 4096 --vcpus 2 --cpu host-passthrough --machine q35 --os-variant ubuntu24.04 --boot uefi \
+  --memory 4096 --vcpus 2 --cpu host-passthrough --machine q35 --os-variant ubuntu26.04 --boot uefi \
   --import \
   --disk "path=$build_disk,device=disk,bus=virtio" \
   --disk "path=$build_seed,device=cdrom,bus=sata,readonly=on" \

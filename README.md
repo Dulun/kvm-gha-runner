@@ -38,7 +38,7 @@ to paste the GitHub token or key to you; I enter it myself.
 Steps for the agent. Run everything as the human's normal user, not root.
 
 1. **Check the host.**
-   - It must be Ubuntu 24.04 (`. /etc/os-release`), and `/dev/kvm` must exist.
+   - It must be Ubuntu 26.04 LTS (`. /etc/os-release`), and `/dev/kvm` must exist.
    - `sudo -n true` must succeed. If sudo asks for a password, ask the human to run this in their own
      terminal: `echo "$USER ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/kgr-setup`. Remind them
      to remove it at the end.
@@ -93,7 +93,7 @@ Don't edit files in the repository, run `kgr rebuild` or delete images or caches
   [actions/scaleset](https://github.com/actions/scaleset) client. For each job it clones a fresh VM from a
   read-only golden image, registers it with a just-in-time config, and deletes the VM when the job ends.
   `RUNNER_MIN` VMs are kept idle and ready. Each VM gets its own CPUs, memory and a thin disk.
-- **Slim image, built unattended.** The image is official Ubuntu 24.04, signature-checked, plus `curl`,
+- **Slim image, built unattended.** The image is official Ubuntu 26.04 LTS, signature-checked, plus `curl`,
   `git`, `gh`, `jq`, Docker (buildx, compose), Node 24, pnpm, Python 3 and the Actions runner.
   Workflows install anything else with the usual `setup-*` actions, and those downloads land in a shared
   tool cache.
@@ -119,11 +119,14 @@ also a command:
 | Command | What it does |
 | --- | --- |
 | `kgr up` | Set up or repair everything and start the runners. Safe to rerun. |
-| `kgr status` | Caches, image, service, proxy, running VMs and recent log |
+| `kgr status` | Caches, image, service, proxy, token expiry, running VMs and recent log |
+| `kgr log` | Follow the runner log live (Ctrl+C goes back) |
 | `kgr github` | Change the token or App, e.g. when a token expires |
 | `kgr proxy` | Change the proxies |
-| `kgr runners` | Change CPUs, memory and disk per runner, idle and maximum count, label |
+| `kgr runners` | CPUs, memory and disk per runner, idle and maximum count, label, crashed VMs kept for debugging |
+| `kgr update` | Pull the latest kvm-gha-runner and apply it |
 | `kgr rebuild` | Build a new golden image (next version number) and switch to it |
+| `kgr clean` | Show disk use; delete old images and, if you confirm, empty the caches |
 | `kgr stop` | Stop the runners |
 
 From the menu, changes are applied when you confirm. With the commands, run `kgr up` afterwards.
@@ -141,7 +144,7 @@ Secrets stay in `~/.config/kvm-gha-runner/` with mode 0600 and are never printed
 
 ## Requirements
 
-- Ubuntu 24.04 host with KVM (`/dev/kvm`) and sudo. `kgr` installs the packages it needs.
+- Ubuntu 26.04 LTS host with KVM (`/dev/kvm`) and sudo. `kgr` installs the packages it needs.
 - The libvirt default network on `192.168.122.1`, which is the libvirt default.
 - Disk: about 3 GB for the image, plus the caches as they grow.
 

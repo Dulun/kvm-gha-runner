@@ -23,8 +23,8 @@ services:
       REGISTRY_HTTP_ADDR: 192.168.122.1:5000
       REGISTRY_PROXY_REMOTEURL: https://registry-1.docker.io
       REGISTRY_STORAGE_DELETE_ENABLED: 'true'
-      HTTP_PROXY: ${HOST_PROXY:-http://127.0.0.1:7897}
-      HTTPS_PROXY: ${HOST_PROXY:-http://127.0.0.1:7897}
+      HTTP_PROXY: ${HOST_PROXY:-}
+      HTTPS_PROXY: ${HOST_PROXY:-}
       NO_PROXY: 127.0.0.1,192.168.122.0/24
     volumes:
       - /srv/ci-cache/registry-hub:/var/lib/registry

@@ -2,7 +2,7 @@
 # kvm-gha-runner: one script to set up, run and manage ephemeral KVM GitHub Actions runners on this host.
 #   kgr            interactive menu (first run walks through every question)
 #   kgr up         set up / repair everything and start the runners (safe to rerun any time)
-#   kgr status | stop | github | proxy | runners | rebuild
+#   kgr status | log | stop | github | proxy | runners | update | rebuild | clean
 # Run as the user that owns the runners (not root); sudo is used where needed.
 set -Eeuo pipefail
 
@@ -42,7 +42,7 @@ need_tty() { [ -t 0 ] || die "this needs answers: run kgr in a terminal."; }
 # ---------------------------------------------------------------- config
 
 GITHUB_URL='' GITHUB_APP_CLIENT_ID='' GITHUB_APP_INSTALLATION_ID=''
-RUNNER_LABELS='kvm-runner-set' RUNNER_MIN='2' RUNNER_MAX='8' RUNNER_CPUS='2' RUNNER_MEMORY_GIB='4' RUNNER_DISK_GIB='20'
+RUNNER_LABELS='kvm-runner-set' RUNNER_MIN='2' RUNNER_MAX='8' RUNNER_CPUS='2' RUNNER_MEMORY_GIB='4' RUNNER_DISK_GIB='20' RUNNER_KEEP_FAILED='2'
 GOLDEN_VOLUME='kvm-gha-slim-v1.qcow2' GUEST_USER='runner'
 HOST_PROXY='http://127.0.0.1:7897' GUEST_PROXY='http://192.168.122.1:7897'
 
@@ -70,6 +70,7 @@ save_config() {
       "RUNNER_CPUS=$RUNNER_CPUS" \
       "RUNNER_MEMORY_GIB=$RUNNER_MEMORY_GIB" \
       "RUNNER_DISK_GIB=$RUNNER_DISK_GIB" \
+      "RUNNER_KEEP_FAILED=$RUNNER_KEEP_FAILED" \
       '# Change the name to build a fresh image on the next "up".' \
       "GOLDEN_VOLUME=$GOLDEN_VOLUME" \
       "GUEST_USER=$GUEST_USER" \
@@ -147,6 +148,7 @@ configure_runners() {
   ask_number RUNNER_DISK_GIB 'Disk per runner (GiB)' "$RUNNER_DISK_GIB" 10
   ask_number RUNNER_MIN 'Idle runners kept ready for jobs' "$RUNNER_MIN" 0
   ask_number RUNNER_MAX 'Maximum runners at once' "$RUNNER_MAX" "$((RUNNER_MIN > 1 ? RUNNER_MIN : 1))"
+  ask_number RUNNER_KEEP_FAILED 'Crashed runner VMs kept for debugging (0 = delete them)' "$RUNNER_KEEP_FAILED" 0
   save_config
 }
 
@@ -275,7 +277,7 @@ manager_args() {
   args=(
     --url "$GITHUB_URL" --name "$RUNNER_LABELS" --labels "$RUNNER_LABELS" --runner-group default
     "${auth[@]}" --golden-volume "$GOLDEN_VOLUME" --guest-user "$GUEST_USER" --guest-http-proxy="$GUEST_PROXY"
-    --cpus "$RUNNER_CPUS" --memory-mib "$((RUNNER_MEMORY_GIB * 1024))" --disk-gib "$RUNNER_DISK_GIB" --min-runners "$RUNNER_MIN" --max-runners "$RUNNER_MAX"
+    --cpus "$RUNNER_CPUS" --memory-mib "$((RUNNER_MEMORY_GIB * 1024))" --disk-gib "$RUNNER_DISK_GIB" --max-retained-failed "$RUNNER_KEEP_FAILED" --min-runners "$RUNNER_MIN" --max-runners "$RUNNER_MAX"
   )
 }
 
@@ -349,6 +351,15 @@ cmd_status() {
   check "golden image $GOLDEN_VOLUME" "${virsh_cmd[@]}" vol-info --pool default "$GOLDEN_VOLUME"
   check 'kvm-gha-runner service' systemctl --user is-active --quiet kvm-gha-runner.service
   check_proxy
+  if [ -f "$token_file" ]; then
+    local expiry
+    # GitHub reports a fine-grained token's expiry in a response header; the token goes in through stdin.
+    expiry="$(sed 's/^/Authorization: Bearer /' "$token_file" |
+      curl --silent --max-time 15 ${HOST_PROXY:+--proxy "$HOST_PROXY"} --header @- --dump-header - --output /dev/null \
+        "https://api.github.com/repos/${GITHUB_URL#https://github.com/}" |
+      tr -d '\r' | sed -n 's/^github-authentication-token-expiration: //Ip' || true)"
+    printf '  info  GitHub token expires: %s (renew with GitHub access in the menu)\n' "${expiry:-never, or GitHub did not say}"
+  fi
   printf '\nRunner VMs:\n'
   "${virsh_cmd[@]}" list --name | grep '^kvm-gha-' | sed 's/^/  /' || echo '  none'
   printf '\nRecent manager log:\n'
@@ -388,6 +399,54 @@ cmd_rebuild() {
   echo "Runners now start from $GOLDEN_VOLUME. Older images stay in /var/lib/libvirt/images until you delete them."
 }
 
+cmd_log() {
+  echo 'Following the runner log. Press Ctrl+C to go back.'
+  trap 'true' INT
+  journalctl --user -u kvm-gha-runner.service -n 50 --follow || true
+  trap - INT
+}
+
+cmd_update() {
+  step 'Update kvm-gha-runner'
+  env ${HOST_PROXY:+https_proxy="$HOST_PROXY"} git -C "$repo" pull --ff-only ||
+    die "git pull failed in $repo (local edits?): fix it, then run kgr up."
+  exec "$repo/kgr" up
+}
+
+cmd_clean() {
+  need_tty
+  local vol answer old=()
+  step 'Disk usage'
+  sudo du -sh "$cache_root"/* 2>/dev/null | sed 's/^/  /' || true
+  "${virsh_cmd[@]}" vol-list default --details | awk 'NR <= 2 || /kvm-gha-slim-/'
+  # ponytail: only images named kvm-gha-slim-vN (the rebuild default) are offered for deletion.
+  for vol in $("${virsh_cmd[@]}" vol-list default | awk 'NR > 2 && $1 ~ /^kvm-gha-slim-v[0-9]+\.qcow2$/ { print $1 }'); do
+    if [ "$vol" != "$GOLDEN_VOLUME" ] && ! image_in_use "$vol"; then old+=("$vol"); fi
+  done
+  if [ "${#old[@]}" -gt 0 ]; then
+    ask answer "Delete old images not in use (${old[*]})? (y/N)" 'N'
+    if [[ "$answer" =~ ^[Yy] ]]; then
+      for vol in "${old[@]}"; do "${virsh_cmd[@]}" vol-delete --pool default "$vol"; done
+    fi
+  fi
+  ask answer 'Empty all caches (npm, pnpm, tool cache, Verdaccio, Docker Hub mirror)? They refill on later jobs; runners stop meanwhile (y/N)' 'N'
+  [[ "$answer" =~ ^[Yy] ]] || return 0
+  systemctl --user stop kvm-gha-runner.service || true
+  sudo env HOST_PROXY="$HOST_PROXY" docker compose --file "$repo/cache/compose.yaml" down
+  sudo find "$cache_root"/{pnpm,pnpm-cache,npm,toolcache,registry-hub} "$cache_root/verdaccio/storage" -mindepth 1 -delete
+  cmd_up
+}
+
+image_in_use() { # image_in_use VOLUME: true when another volume in the pool is backed by it
+  local vol
+  for vol in $("${virsh_cmd[@]}" vol-list default | awk 'NR > 2 && NF { print $1 }'); do
+    [ "$vol" != "$1" ] || continue
+    "${virsh_cmd[@]}" vol-dumpxml --pool default "$vol" 2>/dev/null |
+      sed -n '/<backingStore>/,/<\/backingStore>/p' | grep --quiet --fixed-strings "/$1<" && return 0
+  done
+  return 1
+}
+
 menu() {
   local choice apply
   while true; do
@@ -396,25 +455,31 @@ menu() {
       "$RUNNER_MAX" "$RUNNER_CPUS" "$RUNNER_MEMORY_GIB" "$RUNNER_DISK_GIB" "$RUNNER_MIN" "$RUNNER_LABELS"
     printf '  1) Set up / start everything\n'
     printf '  2) Status\n'
-    printf '  3) GitHub access (token or App)\n'
-    printf '  4) Proxy\n'
-    printf '  5) Runners: CPU, memory, disk, count and label\n'
-    printf '  6) Rebuild the golden image\n'
-    printf '  7) Stop the runners\n'
+    printf '  3) Live log\n'
+    printf '  4) GitHub access (token or App)\n'
+    printf '  5) Proxy\n'
+    printf '  6) Runners: CPU, memory, disk, count, label, crashed VMs kept\n'
+    printf '  7) Update kvm-gha-runner and apply\n'
+    printf '  8) Rebuild the golden image\n'
+    printf '  9) Disk usage and cleanup\n'
+    printf '  s) Stop the runners\n'
     printf '  q) Quit\n'
     ask choice 'Choose' '1'
     case "$choice" in
       1) cmd_up ;;
       2) cmd_status || true ;;
-      3) configure_github ;;
-      4) configure_proxy ;;
-      5) configure_runners ;;
-      6) cmd_rebuild ;;
-      7) systemctl --user stop kvm-gha-runner.service && echo 'Stopped. Option 1 starts them again.' ;;
+      3) cmd_log ;;
+      4) configure_github ;;
+      5) configure_proxy ;;
+      6) configure_runners ;;
+      7) cmd_update ;;
+      8) cmd_rebuild ;;
+      9) cmd_clean ;;
+      s | S) systemctl --user stop kvm-gha-runner.service && echo 'Stopped. Option 1 starts them again.' ;;
       q | Q) return ;;
       *) echo "unknown choice: $choice" ;;
     esac
-    if [[ "$choice" =~ ^[345]$ ]]; then
+    if [[ "$choice" =~ ^[456]$ ]]; then
       ask apply 'Apply now? It restarts the runners, so jobs running right now may fail (Y/n)' 'Y'
       if [[ "$apply" =~ ^[Nn] ]]; then echo 'Not applied. Option 1 applies it later.'; else cmd_up; fi
     fi
@@ -435,5 +500,8 @@ case "${1:-}" in
   proxy) configure_proxy ;;
   runners) configure_runners ;;
   rebuild) cmd_rebuild ;;
-  *) die "unknown command: $1 (use: up, status, stop, github, proxy, runners, rebuild)" ;;
+  log) cmd_log ;;
+  update) cmd_update ;;
+  clean) cmd_clean ;;
+  *) die "unknown command: $1 (use: up, status, log, stop, github, proxy, runners, update, rebuild, clean)" ;;
 esac
