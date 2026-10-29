@@ -99,7 +99,8 @@ tar --extract --gzip --file "$tmp/runner.tar.gz" --directory /opt/actions-runner
 printf '%s\n' \
   "RUNNER_TOOL_CACHE=$cache_root/toolcache" "AGENT_TOOLSDIRECTORY=$cache_root/toolcache" \
   "GOMODCACHE=$cache_root/go-mod" "PIP_CACHE_DIR=$cache_root/pip" \
-  "UV_CACHE_DIR=$cache_root/uv" 'UV_LINK_MODE=copy' >/opt/actions-runner/.env
+  "UV_CACHE_DIR=$cache_root/uv" 'UV_LINK_MODE=copy' \
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES=$cache_root/git/mirror.git/objects" >/opt/actions-runner/.env
 chown -R "$GUEST_USER:$GUEST_USER" /opt/actions-runner
 
 if has_tool go; then
@@ -168,6 +169,9 @@ if has_tool deno; then deno --version | head -1; fi
 if has_tool actionlint; then actionlint --version | head -1; fi
 if has_tool aliyun; then aliyun version; fi
 runuser -u "$GUEST_USER" -- /opt/actions-runner/bin/Runner.Listener --version
+
+# apt in jobs goes through the host cache (written last, so the build itself uses the build proxy).
+printf 'Acquire::http::Proxy "http://%s:3142";\n' "$cache_host" >/etc/apt/apt.conf.d/01kvm-gha-cache
 
 # Leave nothing build-specific behind: no build proxy, no apt lists, no host keys, fresh machine-id.
 rm -f /etc/apt/apt.conf.d/90cloud-init-aptproxy /root/kvm-gha-build.env

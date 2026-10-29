@@ -111,6 +111,7 @@ configure_github() {
     printf '\nCreate the token at https://github.com/settings/personal-access-tokens/new\n'
     printf '  - Repository access: Only select repositories -> %s\n' "$repo_path"
     printf '  - Permissions -> Repository permissions -> Administration: Read and write\n'
+    printf '    Contents: Read-only (lets the git cache fetch a private repository)\n'
     printf '    (Metadata: Read-only is added automatically; nothing else is needed)\n'
     printf '  - Expiration: your choice. When it expires, runners stop registering: rerun kgr github.\n\n'
     read -r -s -p 'Paste the token (hidden): ' token
@@ -174,7 +175,7 @@ configure_image() {
   need_tty
   local items=() i id picked images ref
   if ! command -v whiptail >/dev/null 2>&1; then
-    sudo env ${HOST_PROXY:+http_proxy="$HOST_PROXY" https_proxy="$HOST_PROXY"} apt-get install --yes whiptail
+    sudo env DEBIAN_FRONTEND=noninteractive ${HOST_PROXY:+http_proxy="$HOST_PROXY" https_proxy="$HOST_PROXY"} apt-get install --yes whiptail
   fi
   for ((i = 0; i < ${#image_tool_catalog[@]}; i += 2)); do
     id="${image_tool_catalog[i]}"
@@ -230,7 +231,7 @@ check_proxy() {
 ensure_packages() {
   step 'Packages and groups'
   local packages=(
-    ca-certificates cloud-image-utils curl git gpgv jq libvirt-clients libvirt-daemon-system
+    apt-cacher-ng ca-certificates cloud-image-utils curl git gpgv jq libvirt-clients libvirt-daemon-system
     nfs-kernel-server ovmf qemu-system-x86 qemu-utils ubuntu-cloudimage-keyring virtinst
   ) missing=() package group relogin=0
   # Docker CE conflicts with docker.io: keep whichever Docker is already installed.
@@ -241,8 +242,8 @@ ensure_packages() {
       missing+=("$package")
   done
   if [ "${#missing[@]}" -gt 0 ]; then
-    sudo env ${HOST_PROXY:+http_proxy="$HOST_PROXY" https_proxy="$HOST_PROXY"} apt-get update
-    sudo env ${HOST_PROXY:+http_proxy="$HOST_PROXY" https_proxy="$HOST_PROXY"} apt-get install --yes "${missing[@]}"
+    sudo env DEBIAN_FRONTEND=noninteractive ${HOST_PROXY:+http_proxy="$HOST_PROXY" https_proxy="$HOST_PROXY"} apt-get update
+    sudo env DEBIAN_FRONTEND=noninteractive ${HOST_PROXY:+http_proxy="$HOST_PROXY" https_proxy="$HOST_PROXY"} apt-get install --yes "${missing[@]}"
   fi
   sudo systemctl enable --now libvirtd.service docker.service
   # dockerd ignores shell proxy variables: give it HOST_PROXY so the cache images pull through it.
@@ -289,7 +290,7 @@ ensure_libvirt() {
 }
 
 ensure_caches() {
-  step 'Caches: Verdaccio :4873, Docker Hub mirror :5000, NFS /srv/ci-cache'
+  step 'Caches: Verdaccio :4873, Docker Hub mirror :5000, apt :3142, git, NFS /srv/ci-cache'
   local name project
   sudo install -d "$cache_root"/{pnpm,pnpm-cache,npm,toolcache,go-mod,pip,uv,verdaccio,registry-hub}
   sudo chown 1000:1000 "$cache_root"/{pnpm,pnpm-cache,npm,toolcache,go-mod,pip,uv}
@@ -313,6 +314,53 @@ ensure_caches() {
   sudo rm -f /etc/exports.d/ci-cache.exports
   sudo systemctl enable --now nfs-server.service
   sudo exportfs -ra
+
+  # apt cache: Ubuntu's apt-cacher-ng, listening only for the VMs; misses go through HOST_PROXY.
+  sudo install -d -o apt-cacher-ng -g apt-cacher-ng "$cache_root/apt"
+  # apt-cacher-ng reads every *.conf in its directory; zz- sorts last, so these settings win.
+  {
+    printf 'CacheDir: %s/apt\nBindAddress: 192.168.122.1\nPort: 3142\n' "$cache_root"
+    if [ -n "$HOST_PROXY" ]; then printf 'Proxy: %s\n' "$HOST_PROXY"; fi
+  } | sudo tee /etc/apt-cacher-ng/zz-kvm-gha.conf >/dev/null
+  # At boot virbr0 can come up after apt-cacher-ng: wait for the address instead of failing to bind.
+  sudo install -d /etc/systemd/system/apt-cacher-ng.service.d
+  printf '%s\n' '[Unit]' 'After=libvirtd.service network-online.target' '' '[Service]' \
+    "ExecStartPre=/bin/sh -c 'until ip -4 addr show dev virbr0 | grep -q 192.168.122.1/; do sleep 1; done'" \
+    'TimeoutStartSec=180' 'Restart=on-failure' 'RestartSec=5s' |
+    sudo tee /etc/systemd/system/apt-cacher-ng.service.d/kvm-gha.conf >/dev/null
+  sudo systemctl daemon-reload
+  sudo systemctl enable apt-cacher-ng.service >/dev/null 2>&1
+  sudo systemctl restart apt-cacher-ng.service
+
+  # git cache: a mirror VMs borrow objects from (GIT_ALTERNATE_OBJECT_DIRECTORIES), refreshed by a timer.
+  sudo install -d -o "$USER" -g "$USER" "$cache_root/git"
+  install -d "$(dirname -- "$unit")"
+  printf '%s\n' '[Unit]' 'Description=kvm-gha-runner git cache refresh' '' '[Service]' 'Type=oneshot' \
+    "ExecStart=$repo/kgr git-sync" >"$(dirname -- "$unit")/kvm-gha-git-sync.service"
+  printf '%s\n' '[Unit]' 'Description=Refresh the kvm-gha-runner git cache every 5 minutes' '' '[Timer]' \
+    'OnBootSec=1min' 'OnUnitActiveSec=5min' '' '[Install]' 'WantedBy=timers.target' \
+    >"$(dirname -- "$unit")/kvm-gha-git-sync.timer"
+  systemctl --user daemon-reload
+  systemctl --user enable --now kvm-gha-git-sync.timer >/dev/null 2>&1
+  # The first fetch of a big repository can take minutes: run it in the background.
+  systemctl --user start --no-block kvm-gha-git-sync.service
+}
+
+cmd_git_sync() {
+  local mirror="$cache_root/git/mirror.git" auth=()
+  if [ ! -d "$mirror" ]; then
+    git init --bare --quiet "$mirror"
+    # Never gc or prune: job checkouts borrow these objects while they run.
+    git -C "$mirror" config gc.auto 0
+    git -C "$mirror" remote add origin "$GITHUB_URL.git"
+  fi
+  git -C "$mirror" remote set-url origin "$GITHUB_URL.git"
+  if [ -f "$token_file" ]; then
+    # The helper reads the token file at fetch time, so the token never appears on a command line.
+    auth=(-c credential.helper= -c "credential.helper=!f() { test \"\$1\" = get || exit 0; echo username=x-access-token; printf 'password=%s\\n' \"\$(cat '$token_file')\"; }; f")
+  fi
+  env GIT_TERMINAL_PROMPT=0 ${HOST_PROXY:+https_proxy="$HOST_PROXY"} \
+    git -C "$mirror" "${auth[@]}" fetch --quiet --prune origin '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'
 }
 
 ensure_image() {
@@ -408,6 +456,8 @@ cmd_status() {
   }
   check 'Verdaccio :4873' curl --fail --silent --max-time 5 http://192.168.122.1:4873/-/ping
   check 'Docker Hub mirror :5000' curl --fail --silent --max-time 5 http://192.168.122.1:5000/v2/
+  check 'apt cache :3142' curl --fail --silent --max-time 5 --output /dev/null http://192.168.122.1:3142/acng-report.html
+  check 'git cache (refreshed every 5 min)' bash -c "git -C '$cache_root/git/mirror.git' for-each-ref --count=1 | grep --quiet ."
   check 'NFS export /srv/ci-cache' bash -c 'sudo exportfs -v | grep --quiet /srv/ci-cache'
   check "golden image $GOLDEN_VOLUME" "${virsh_cmd[@]}" vol-info --pool default "$GOLDEN_VOLUME"
   check 'kvm-gha-runner service' systemctl --user is-active --quiet kvm-gha-runner.service
@@ -483,11 +533,11 @@ cmd_clean() {
       for vol in "${old[@]}"; do "${virsh_cmd[@]}" vol-delete --pool default "$vol"; done
     fi
   fi
-  ask answer 'Empty all caches (npm, pnpm, tool cache, Go modules, pip, uv, Verdaccio, Docker Hub mirror)? They refill on later jobs; runners stop meanwhile (y/N)' 'N'
+  ask answer 'Empty all caches (npm, pnpm, tool cache, Go modules, pip, uv, apt, git, Verdaccio, Docker Hub mirror)? They refill on later jobs; runners stop meanwhile (y/N)' 'N'
   [[ "$answer" =~ ^[Yy] ]] || return 0
   systemctl --user stop kvm-gha-runner.service || true
   sudo env HOST_PROXY="$HOST_PROXY" docker compose --file "$repo/cache/compose.yaml" down
-  sudo find "$cache_root"/{pnpm,pnpm-cache,npm,toolcache,go-mod,pip,uv,registry-hub} "$cache_root/verdaccio/storage" -mindepth 1 -delete
+  sudo find "$cache_root"/{pnpm,pnpm-cache,npm,toolcache,go-mod,pip,uv,apt,git,registry-hub} "$cache_root/verdaccio/storage" -mindepth 1 -delete
   cmd_up
 }
 
@@ -562,5 +612,6 @@ case "${1:-}" in
   log) cmd_log ;;
   update) cmd_update ;;
   clean) cmd_clean ;;
+  git-sync) cmd_git_sync ;;
   *) die "unknown command: $1 (use: up, status, log, stop, github, proxy, runners, image, update, rebuild, clean)" ;;
 esac

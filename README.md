@@ -70,7 +70,7 @@ Steps for the agent. Run everything as the human's normal user, not root.
 4. **GitHub access: the human does this part.**
    - Ask them to create a fine-grained token at
      <https://github.com/settings/personal-access-tokens/new>, limited to only this repository, with
-     Repository permissions → Administration: Read and write.
+     Repository permissions → Administration: Read and write, and Contents: Read-only (for the git cache).
    - Then ask them to run `~/kvm-gha-runner/kgr github` in their own terminal. It asks for the
      repository URL (accept the default), then option `1`, then the token. Input is hidden, and the
      token is checked against GitHub before it is saved.
@@ -116,10 +116,12 @@ Don't edit files in the repository, run `kgr rebuild` or delete images or caches
   | --- | --- | --- |
   | Verdaccio npm registry | `192.168.122.1:4873` | npm and pnpm in VMs |
   | Docker Hub pull-through | `192.168.122.1:5000` | dockerd in VMs (`registry-mirrors`) |
+  | apt-cacher-ng | `192.168.122.1:3142` | `apt-get update` and `apt-get install` in jobs |
+  | git mirror of your repository, refreshed every 5 minutes | `/mnt/ci-cache/git/mirror.git` | every git command in VMs borrows its objects (`GIT_ALTERNATE_OBJECT_DIRECTORIES`), so `actions/checkout` downloads only what changed since the last refresh |
   | NFS `/srv/ci-cache` | mounted at `/mnt/ci-cache` | pnpm store, npm cache, Actions tool cache (`RUNNER_TOOL_CACHE`), Go modules (`GOMODCACHE`), pip and uv caches |
 
-  Not cached: images from registries other than Docker Hub (bake them in instead), apt packages installed
-  by jobs, Deno's `jsr:` imports and `actions/cache`. Those go through the proxy each time.
+  Not cached: images from registries other than Docker Hub (bake them in instead), Deno's `jsr:` imports,
+  apt repositories served over HTTPS and `actions/cache`. Those go through the proxy each time.
 - **Proxy everywhere.**
   - `HOST_PROXY` covers apt, downloads, `go build`, the host's dockerd and cache misses.
   - `GUEST_PROXY` is injected into every VM: the runner and job steps (`HTTP(S)_PROXY`), dockerd (image
@@ -152,7 +154,8 @@ From the menu, changes are applied when you confirm. With the commands, run `kgr
 
 - **Fine-grained token (simplest):** create it at <https://github.com/settings/personal-access-tokens/new>.
   - Repository access: only the repository the runners serve.
-  - Permissions: Repository → Administration: Read and write. Metadata: Read-only is added automatically.
+  - Permissions: Repository → Administration: Read and write, and Contents: Read-only so the git cache can
+    fetch a private repository. Metadata: Read-only is added automatically.
   - When the token expires, runners stop registering. Run `kgr github` to paste a new one.
 - **GitHub App (never expires):** Administration: Read and write, webhook off, installed on the
   repository. You need the App ID, the Installation ID and the downloaded private key.
