@@ -55,11 +55,15 @@ fi
 
 echo '==> Build VM disk and cloud-init seed'
 qemu-img convert -O qcow2 "$cache_dir/$image_file" "$build_disk"
-qemu-img resize "$build_disk" 10G >/dev/null
+# Small, so the per-runner disk setting decides the VM size; baked Docker images need more room.
+disk_gib=10
+if [[ " ${IMAGE_TOOLS:-} " == *" supabase-stack "* ]] || [ -n "${IMAGE_DOCKER_IMAGES:-}" ]; then disk_gib=30; fi
+qemu-img resize "$build_disk" "${disk_gib}G" >/dev/null
 chown libvirt-qemu:kvm "$build_disk"
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-printf 'GUEST_USER=%q\nBUILD_PROXY=%q\n' "$guest_user" "$build_proxy" >"$work/build.env"
+printf 'GUEST_USER=%q\nBUILD_PROXY=%q\nIMAGE_TOOLS=%q\nIMAGE_DOCKER_IMAGES=%q\n' \
+  "$guest_user" "$build_proxy" "${IMAGE_TOOLS:-}" "${IMAGE_DOCKER_IMAGES:-}" >"$work/build.env"
 {
   cat <<EOF
 #cloud-config

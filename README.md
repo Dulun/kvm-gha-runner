@@ -59,6 +59,8 @@ Steps for the agent. Run everything as the human's normal user, not root.
    RUNNER_DISK_GIB=20
    GOLDEN_VOLUME=kvm-gha-slim-v1.qcow2
    GUEST_USER=runner
+   IMAGE_TOOLS='node python go supabase'
+   IMAGE_DOCKER_IMAGES=''
    HOST_PROXY=http://127.0.0.1:7897
    GUEST_PROXY=http://192.168.122.1:7897
    ```
@@ -93,17 +95,29 @@ Don't edit files in the repository, run `kgr rebuild` or delete images or caches
   [actions/scaleset](https://github.com/actions/scaleset) client. For each job it clones a fresh VM from a
   read-only golden image, registers it with a just-in-time config, and deletes the VM when the job ends.
   `RUNNER_MIN` VMs are kept idle and ready. Each VM gets its own CPUs, memory and a thin disk.
-- **Slim image, built unattended.** The image is official Ubuntu 26.04 LTS, signature-checked, plus `curl`,
-  `git`, `gh`, `jq`, Docker (buildx, compose), Node 24, pnpm, Python 3 and the Actions runner.
-  Workflows install anything else with the usual `setup-*` actions, and those downloads land in a shared
-  tool cache.
+- **Image built unattended, with the tools you pick.** The image is official Ubuntu 26.04 LTS,
+  signature-checked, plus `curl`, `git`, `gh`, `jq`, Docker (buildx, compose) and the Actions runner. In
+  `kgr` → *Image contents* you tick what else to bake in (space selects, Enter confirms):
+
+  | Tool | Default |
+  | --- | --- |
+  | Node.js LTS with pnpm, Python 3 (pip, venv, uv), Go, Supabase CLI | on |
+  | Docker images of the local Supabase stack, Deno, actionlint, ShellCheck, skopeo, OpenSlide, Alibaba Cloud CLI | off |
+
+  You can also list any other Docker images to bake in. Baked tools are downloaded once, when the image is
+  built; jobs find them already installed. Every download is pinned to a version and checksum in
+  `image/provision.sh`. Tools you don't bake can still come from `setup-*` actions, which download each
+  version once into the shared tool cache.
 - **Caches on the host, shared by every VM.** Upstream is fetched once, through your proxy, on a miss:
 
   | Cache | Where | Used by |
   | --- | --- | --- |
   | Verdaccio npm registry | `192.168.122.1:4873` | npm and pnpm in VMs |
   | Docker Hub pull-through | `192.168.122.1:5000` | dockerd in VMs (`registry-mirrors`) |
-  | NFS `/srv/ci-cache` | mounted at `/mnt/ci-cache` | pnpm store, npm cache, Actions tool cache (`RUNNER_TOOL_CACHE`) |
+  | NFS `/srv/ci-cache` | mounted at `/mnt/ci-cache` | pnpm store, npm cache, Actions tool cache (`RUNNER_TOOL_CACHE`), Go modules (`GOMODCACHE`), pip and uv caches |
+
+  Not cached: images from registries other than Docker Hub (bake them in instead), apt packages installed
+  by jobs, Deno's `jsr:` imports and `actions/cache`. Those go through the proxy each time.
 - **Proxy everywhere.**
   - `HOST_PROXY` covers apt, downloads, `go build`, the host's dockerd and cache misses.
   - `GUEST_PROXY` is injected into every VM: the runner and job steps (`HTTP(S)_PROXY`), dockerd (image
@@ -124,6 +138,7 @@ also a command:
 | `kgr github` | Change the token or App, e.g. when a token expires |
 | `kgr proxy` | Change the proxies |
 | `kgr runners` | CPUs, memory and disk per runner, idle and maximum count, label, crashed VMs kept for debugging |
+| `kgr image` | Pick the tools and Docker images baked into the image; the next apply builds it |
 | `kgr update` | Pull the latest kvm-gha-runner and apply it |
 | `kgr rebuild` | Build a new golden image (next version number) and switch to it |
 | `kgr clean` | Show disk use; delete old images and, if you confirm, empty the caches |

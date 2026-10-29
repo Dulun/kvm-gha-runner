@@ -2,7 +2,7 @@
 # kvm-gha-runner: one script to set up, run and manage ephemeral KVM GitHub Actions runners on this host.
 #   kgr            interactive menu (first run walks through every question)
 #   kgr up         set up / repair everything and start the runners (safe to rerun any time)
-#   kgr status | log | stop | github | proxy | runners | update | rebuild | clean
+#   kgr status | log | stop | github | proxy | runners | image | update | rebuild | clean
 # Run as the user that owns the runners (not root); sudo is used where needed.
 set -Eeuo pipefail
 
@@ -44,6 +44,21 @@ need_tty() { [ -t 0 ] || die "this needs answers: run kgr in a terminal."; }
 GITHUB_URL='' GITHUB_APP_CLIENT_ID='' GITHUB_APP_INSTALLATION_ID=''
 RUNNER_LABELS='kvm-runner-set' RUNNER_MIN='2' RUNNER_MAX='8' RUNNER_CPUS='2' RUNNER_MEMORY_GIB='4' RUNNER_DISK_GIB='20' RUNNER_KEEP_FAILED='2'
 GOLDEN_VOLUME='kvm-gha-slim-v1.qcow2' GUEST_USER='runner'
+IMAGE_TOOLS='node python go supabase' IMAGE_DOCKER_IMAGES=''
+# Tools that can be baked into the golden image: ID, description. Versions live in image/provision.sh.
+readonly image_tool_catalog=(
+  node 'Node.js LTS with pnpm (npm and pnpm use the Verdaccio cache)'
+  python 'Python 3 with pip, venv and uv'
+  go 'Go'
+  supabase 'Supabase CLI'
+  supabase-stack 'Docker images of the local Supabase stack (several GB)'
+  deno 'Deno'
+  actionlint 'actionlint (GitHub workflow linter)'
+  shellcheck 'ShellCheck'
+  skopeo 'skopeo (copy container images)'
+  openslide 'OpenSlide tools'
+  aliyun 'Alibaba Cloud CLI'
+)
 HOST_PROXY='http://127.0.0.1:7897' GUEST_PROXY='http://192.168.122.1:7897'
 
 load_config() {
@@ -74,6 +89,8 @@ save_config() {
       '# Change the name to build a fresh image on the next "up".' \
       "GOLDEN_VOLUME=$GOLDEN_VOLUME" \
       "GUEST_USER=$GUEST_USER" \
+      "IMAGE_TOOLS='$IMAGE_TOOLS'" \
+      "IMAGE_DOCKER_IMAGES='$IMAGE_DOCKER_IMAGES'" \
       "HOST_PROXY=$HOST_PROXY" \
       "GUEST_PROXY=$GUEST_PROXY" >"$config"
   )
@@ -150,6 +167,48 @@ configure_runners() {
   ask_number RUNNER_MAX 'Maximum runners at once' "$RUNNER_MAX" "$((RUNNER_MIN > 1 ? RUNNER_MIN : 1))"
   ask_number RUNNER_KEEP_FAILED 'Crashed runner VMs kept for debugging (0 = delete them)' "$RUNNER_KEEP_FAILED" 0
   save_config
+}
+
+configure_image() {
+  need_tty
+  local items=() i id picked images ref
+  if ! command -v whiptail >/dev/null 2>&1; then
+    sudo env ${HOST_PROXY:+http_proxy="$HOST_PROXY" https_proxy="$HOST_PROXY"} apt-get install --yes whiptail
+  fi
+  for ((i = 0; i < ${#image_tool_catalog[@]}; i += 2)); do
+    id="${image_tool_catalog[i]}"
+    items+=("$id" "${image_tool_catalog[i + 1]}" "$([[ " $IMAGE_TOOLS " == *" $id "* ]] && echo ON || echo OFF)")
+  done
+  picked="$(whiptail --title 'Golden image: tools' --separate-output --checklist \
+    'Baked into every runner VM, so jobs never download them. Space selects, Enter confirms.' \
+    20 78 11 "${items[@]}" 3>&1 1>&2 2>&3)" || { echo 'Cancelled: nothing changed.'; return 0; }
+  images="$(whiptail --title 'Golden image: Docker images' --inputbox \
+    'Other Docker images to bake in, separated by spaces (e.g. postgres:17 ghcr.io/owner/app:1.2). Leave empty for none.' \
+    10 78 "$IMAGE_DOCKER_IMAGES" 3>&1 1>&2 2>&3)" || { echo 'Cancelled: nothing changed.'; return 0; }
+  picked="$(tr '\n' ' ' <<<"$picked" | sed 's/ *$//')"
+  images="$(xargs <<<"$images")"
+  for ref in $images; do
+    [[ "$ref" =~ ^[A-Za-z0-9][A-Za-z0-9._/:@-]*$ ]] || die "not a Docker image reference: $ref"
+  done
+  if [ "$picked" = "$IMAGE_TOOLS" ] && [ "$images" = "$IMAGE_DOCKER_IMAGES" ]; then
+    echo 'Image contents unchanged.'
+    return 0
+  fi
+  IMAGE_TOOLS="$picked" IMAGE_DOCKER_IMAGES="$images"
+  # A new name makes the next apply build the image; the old one stays until Disk usage and cleanup.
+  if "${virsh_cmd[@]}" vol-info --pool default "$GOLDEN_VOLUME" >/dev/null 2>&1; then
+    GOLDEN_VOLUME="$(next_image_name)"
+  fi
+  save_config
+  echo "Next apply builds $GOLDEN_VOLUME with: ${IMAGE_TOOLS:-only the basics}${IMAGE_DOCKER_IMAGES:+ + $IMAGE_DOCKER_IMAGES}"
+}
+
+next_image_name() {
+  if [[ "$GOLDEN_VOLUME" =~ ^(.*-v)([0-9]+)\.qcow2$ ]]; then
+    echo "${BASH_REMATCH[1]}$((BASH_REMATCH[2] + 1)).qcow2"
+  else
+    echo 'kvm-gha-slim-v1.qcow2'
+  fi
 }
 
 check_proxy() {
@@ -231,8 +290,8 @@ ensure_libvirt() {
 ensure_caches() {
   step 'Caches: Verdaccio :4873, Docker Hub mirror :5000, NFS /srv/ci-cache'
   local name project
-  sudo install -d "$cache_root"/{pnpm,pnpm-cache,npm,toolcache,verdaccio,registry-hub}
-  sudo chown 1000:1000 "$cache_root"/{pnpm,pnpm-cache,npm,toolcache}
+  sudo install -d "$cache_root"/{pnpm,pnpm-cache,npm,toolcache,go-mod,pip,uv,verdaccio,registry-hub}
+  sudo chown 1000:1000 "$cache_root"/{pnpm,pnpm-cache,npm,toolcache,go-mod,pip,uv}
   sudo install -d -o 10001 -g 10001 "$cache_root/verdaccio/storage"
   if [ -n "$HOST_PROXY" ]; then
     sed -e "s#^http_proxy: .*#http_proxy: $HOST_PROXY#" -e "s#^https_proxy: .*#https_proxy: $HOST_PROXY#" \
@@ -263,6 +322,7 @@ ensure_image() {
     return
   fi
   sudo GUEST_USER="$GUEST_USER" BUILD_PROXY="$GUEST_PROXY" HOST_PROXY="$HOST_PROXY" \
+    IMAGE_TOOLS="$IMAGE_TOOLS" IMAGE_DOCKER_IMAGES="$IMAGE_DOCKER_IMAGES" \
     "$repo/image/build-image.sh" "$GOLDEN_VOLUME"
   "${virsh_cmd[@]}" pool-refresh default >/dev/null
 }
@@ -371,7 +431,7 @@ cmd_up() {
   # First run: ask everything once (proxy first, the token check goes through it).
   if ! configured; then
     [ -t 0 ] || die "not configured: write $config and run 'kgr github' in a terminal (README: Set up with an agent)."
-    configure_proxy && configure_github && configure_runners
+    configure_proxy && configure_github && configure_runners && configure_image
   fi
   ensure_packages
   ensure_libvirt
@@ -385,14 +445,7 @@ cmd_up() {
 
 cmd_rebuild() {
   need_tty
-  local next
-  next="$(sed -E 's/-v([0-9]+)\.qcow2$/-v\1/' <<<"$GOLDEN_VOLUME")"
-  if [[ "$next" =~ ^(.*-v)([0-9]+)$ ]]; then
-    next="${BASH_REMATCH[1]}$((BASH_REMATCH[2] + 1)).qcow2"
-  else
-    next='kvm-gha-slim-v1.qcow2'
-  fi
-  ask GOLDEN_VOLUME 'New image name' "$next"
+  ask GOLDEN_VOLUME 'New image name' "$(next_image_name)"
   save_config
   ensure_image
   ensure_manager
@@ -429,11 +482,11 @@ cmd_clean() {
       for vol in "${old[@]}"; do "${virsh_cmd[@]}" vol-delete --pool default "$vol"; done
     fi
   fi
-  ask answer 'Empty all caches (npm, pnpm, tool cache, Verdaccio, Docker Hub mirror)? They refill on later jobs; runners stop meanwhile (y/N)' 'N'
+  ask answer 'Empty all caches (npm, pnpm, tool cache, Go modules, pip, uv, Verdaccio, Docker Hub mirror)? They refill on later jobs; runners stop meanwhile (y/N)' 'N'
   [[ "$answer" =~ ^[Yy] ]] || return 0
   systemctl --user stop kvm-gha-runner.service || true
   sudo env HOST_PROXY="$HOST_PROXY" docker compose --file "$repo/cache/compose.yaml" down
-  sudo find "$cache_root"/{pnpm,pnpm-cache,npm,toolcache,registry-hub} "$cache_root/verdaccio/storage" -mindepth 1 -delete
+  sudo find "$cache_root"/{pnpm,pnpm-cache,npm,toolcache,go-mod,pip,uv,registry-hub} "$cache_root/verdaccio/storage" -mindepth 1 -delete
   cmd_up
 }
 
@@ -453,15 +506,18 @@ menu() {
     printf '\nkvm-gha-runner  %s\n' "${GITHUB_URL:-(not configured)}"
     configured && printf '  runners: %s x (%s CPU, %s GiB, %s GiB disk), %s kept idle, label %s\n' \
       "$RUNNER_MAX" "$RUNNER_CPUS" "$RUNNER_MEMORY_GIB" "$RUNNER_DISK_GIB" "$RUNNER_MIN" "$RUNNER_LABELS"
+    configured && printf '  image:   %s with %s%s\n' "$GOLDEN_VOLUME" "${IMAGE_TOOLS:-only the basics}" \
+      "${IMAGE_DOCKER_IMAGES:+ + $IMAGE_DOCKER_IMAGES}"
     printf '  1) Set up / start everything\n'
     printf '  2) Status\n'
     printf '  3) Live log\n'
     printf '  4) GitHub access (token or App)\n'
     printf '  5) Proxy\n'
     printf '  6) Runners: CPU, memory, disk, count, label, crashed VMs kept\n'
-    printf '  7) Update kvm-gha-runner and apply\n'
-    printf '  8) Rebuild the golden image\n'
-    printf '  9) Disk usage and cleanup\n'
+    printf '  7) Image contents: tools and Docker images baked in\n'
+    printf '  8) Update kvm-gha-runner and apply\n'
+    printf '  9) Rebuild the golden image\n'
+    printf '  c) Disk usage and cleanup\n'
     printf '  s) Stop the runners\n'
     printf '  q) Quit\n'
     ask choice 'Choose' '1'
@@ -472,14 +528,15 @@ menu() {
       4) configure_github ;;
       5) configure_proxy ;;
       6) configure_runners ;;
-      7) cmd_update ;;
-      8) cmd_rebuild ;;
-      9) cmd_clean ;;
+      7) configure_image ;;
+      8) cmd_update ;;
+      9) cmd_rebuild ;;
+      c | C) cmd_clean ;;
       s | S) systemctl --user stop kvm-gha-runner.service && echo 'Stopped. Option 1 starts them again.' ;;
       q | Q) return ;;
       *) echo "unknown choice: $choice" ;;
     esac
-    if [[ "$choice" =~ ^[456]$ ]]; then
+    if [[ "$choice" =~ ^[4567]$ ]]; then
       ask apply 'Apply now? It restarts the runners, so jobs running right now may fail (Y/n)' 'Y'
       if [[ "$apply" =~ ^[Nn] ]]; then echo 'Not applied. Option 1 applies it later.'; else cmd_up; fi
     fi
@@ -499,9 +556,10 @@ case "${1:-}" in
   github) configure_github ;;
   proxy) configure_proxy ;;
   runners) configure_runners ;;
+  image) configure_image ;;
   rebuild) cmd_rebuild ;;
   log) cmd_log ;;
   update) cmd_update ;;
   clean) cmd_clean ;;
-  *) die "unknown command: $1 (use: up, status, log, stop, github, proxy, runners, update, rebuild, clean)" ;;
+  *) die "unknown command: $1 (use: up, status, log, stop, github, proxy, runners, image, update, rebuild, clean)" ;;
 esac

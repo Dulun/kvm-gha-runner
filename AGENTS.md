@@ -31,8 +31,10 @@ Runtime state is outside the repo:
   - In VMs, `GUEST_PROXY` covers the runner env, guest dockerd and the Docker client `proxies`.
   - The caches on `192.168.122.1` and private ranges bypass the proxy (`guestNoProxy` in `manager/libvirt.go`).
   - New downloads must honor the proxy. Empty proxy means a direct connection.
-- **Cache first.** npm and pnpm go through Verdaccio, Docker Hub pulls through `:5000`, and the pnpm store and
-  Actions tool cache are on NFS. Don't bake big tools or images into the golden image; workflows install them.
+- **Download once.** npm and pnpm go through Verdaccio, Docker Hub pulls through `:5000`, and the pnpm store,
+  Actions tool cache, Go modules, pip and uv caches are on NFS. Tools and Docker images are baked into the golden
+  image only when the owner selects them in `kgr` (Image contents). Their IDs in `image_tool_catalog` (kgr) and
+  the `has_tool` branches in `image/provision.sh` must match.
 - **Pinned and verified.** Every downloaded binary (Go, Node, runner) has an exact version plus sha256. The
   cloud image is checked with `gpgv` against Ubuntu's keyring. Container images are pinned by digest.
   Bump the version and the checksum together.
