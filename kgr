@@ -230,7 +230,7 @@ ensure_packages() {
   step 'Packages and groups'
   local packages=(
     ca-certificates cloud-image-utils curl git gpgv jq libvirt-clients libvirt-daemon-system
-    nfs-kernel-server ovmf qemu-kvm qemu-utils ubuntu-cloudimage-keyring virtinst
+    nfs-kernel-server ovmf qemu-system-x86 qemu-utils ubuntu-cloudimage-keyring virtinst
   ) missing=() package group relogin=0
   # Docker CE conflicts with docker.io: keep whichever Docker is already installed.
   command -v docker >/dev/null 2>&1 || packages+=(docker.io)
