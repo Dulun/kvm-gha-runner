@@ -1,3 +1,5 @@
 # /etc/exports.d/kvm-gha-cache.exports — shared pnpm store, npm cache and Actions tool cache for runner VMs.
 # all_squash + anonuid=1000: every guest reads and writes as uid 1000 (the runner user).
-/srv/ci-cache 192.168.122.0/24(rw,sync,no_subtree_check,all_squash,anonuid=1000,anongid=1000)
+# async: the host acknowledges writes before they reach disk. Much faster for the many small files
+# of tool and package caches; a host crash can leave a half-written entry (empty it with kgr clean).
+/srv/ci-cache 192.168.122.0/24(rw,async,no_subtree_check,all_squash,anonuid=1000,anongid=1000)
