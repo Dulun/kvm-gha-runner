@@ -11,8 +11,8 @@ source /root/kvm-gha-build.env # GUEST_USER, BUILD_PROXY, IMAGE_TOOLS, IMAGE_DOC
 readonly node_version='26.13.0' # LTS (Lithium)
 readonly node_sha256='d28a96af6c38596f6d9d97c0ee531c13d238d757742387d1928de822d959e997'
 readonly pnpm_version='12.14.0'
-readonly runner_version='2.336.0'
-readonly runner_sha256='04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d'
+readonly runner_version='2.338.2'
+readonly runner_sha256='baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40'
 # Optional tools (IDs match image_tool_catalog in kgr). Bump the version and the checksum together.
 readonly go_version='1.27.3'
 readonly go_sha256='65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40'
