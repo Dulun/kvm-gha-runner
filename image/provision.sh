@@ -94,6 +94,8 @@ cat >/etc/docker/daemon.json <<EOF
 }
 EOF
 systemctl enable docker.service qemu-guest-agent.service
+# Same timezone as the host, so VM and host timestamps line up.
+timedatectl set-timezone America/Los_Angeles
 
 # Shared cache. nofail: a VM still boots without the host share and falls back to the local dirs below.
 echo "${cache_host}:/srv/ci-cache ${cache_root} nfs4 rw,nofail,_netdev,soft,timeo=50,retrans=2 0 0" >>/etc/fstab
